@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=14
+edge-tts>=7.0
+github-copilot-sdk>=1.0.31
+python-dotenv>=1.0

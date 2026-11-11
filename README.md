@@ -1,50 +1,63 @@
-# joi
+# Joi
 
-Prérequis: python3.4 ou +
+Une compagne vocale holographique, inspirée du personnage de *Blade Runner 2049*.
+On lui parle au micro, elle répond à voix haute, et un hologramme réagit à l'écran.
 
-## Installation
-Sous windows dans un invite de commande avec les privilège d'administrateur, executer les commande si-dessous.
+![Joi en train de parler](docs/capture.png)
+
+## Architecture
+
 ```
-python -m pip install pymongo
-pip install gTTS
-pip install playsound
-pip install beautifulsoup4
-pip install requests
+Navigateur                          Serveur Python (FastAPI)                   Services
+──────────                          ────────────────────────                   ────────
+micro ──PCM 16 kHz──► /ws ──► oreilles.py ──WebSocket──────────────► AssemblyAI (speech-to-text)
+                                   │  tour de parole terminé
+                                   ▼
+                              cerveau.py ──Copilot SDK──────────────► GitHub Copilot (LLM)
+                                   │  réponse, phrase par phrase
+                                   ▼
+haut-parleur ◄──MP3──────────  voix.py ──────────────────────────────► edge-tts (voix fr-CA)
+hologramme (réagit au son)
 ```
-Installer mongodb serveur sur le poste de travail local à la location par défaut.
-https://www.mongodb.com/download-center?jmp=nav#enterprise
 
-Pour lancer mongodb serveur vous pouvez aller dans un invite de commande, dans le dossier bin de mongodb et tapez mongo.exe.
+| Fichier | Rôle |
+|---|---|
+| `joi/oreilles.py` | Transcription en temps réel avec l'API Streaming v3 d'AssemblyAI |
+| `joi/cerveau.py` | Conversation avec Copilot, réponse diffusée et découpée en phrases |
+| `joi/personnalite.md` | La personnalité de Joi (prompt système) : modifie-la librement |
+| `joi/voix.py` | Synthèse vocale, avec cache des phrases déjà prononcées |
+| `joi/serveur.py` | Relie le tout et gère les interruptions |
+| `frontend/` | Interface : hologramme, micro, lecture audio, sous-titres |
 
-Pour plus d'information visité la documentation officiel:
-https://docs.mongodb.com/manual/tutorial/install-mongodb-enterprise-on-windows/
+On peut interrompre Joi en lui parlant par-dessus : elle se tait et écoute.
+On peut aussi lui écrire au clavier (champ en bas de l'écran).
 
-## Structure du programme
+## Prérequis
 
-Pour commencer le programme importe les librairies. Ensuite il lit tout les classe et les fonction à l'intérieur. 
-Puis il arrive à dernière ou c'est écrit Joi.reveille_toi(). Donc dans la classe Joi faire la fonction reveille_toi.
+- Windows, Python 3.12, un navigateur récent (Firefox, Chrome ou Edge)
+- Un abonnement GitHub Copilot (la CLI Copilot doit être connectée à ton compte)
+- Une clé API [AssemblyAI](https://www.assemblyai.com/dashboard)
+
+## Démarrer
+
+Double-clique sur `reveiller_joi.bat`. Au premier lancement, il installe l'environnement,
+crée le fichier `.env` et l'ouvre : colle ta clé AssemblyAI, enregistre, puis relance.
+
+À la main :
+
 ```
-choice = input(Joi.dit("Choisit une fonction"))
-if str(choice) == "math":
-    Skills.faire_des_math()
-elif str(choice) == "nouvelle":
-    Skills.nouvelle_economique()
-elif str(choice) == "produit_croise":
-    Skills.produit_croise()
-elif str(choice) == "fait_jouer":
-    Skills.fait_jouer()
-elif str(choice) == "va_dormir":
-    quit()
-else:
-    print("Vous avez entrer une fonction qui n'existe pas")
-```                
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env      (puis ajoute ta clé)
+.venv\Scripts\python -m joi
+```
 
-À cet instant l'utilisateur doit entré une fonction. Un action que Joi va executer. Tout les "Skills" sont dans une classe appart.
-Dans la classe Joi, il y a présentement seulement 2 fonction. Soit reveille_toi() et dit(text). Donc pour faire dire quelque chose
-à Joi, il faut seulement tapez: Joi.dit("quelque chose"). Pour éviter qu'il y ait trop de requête au serveur de gTTS, la première fois
-que quelque chose est prononcé, un fichier est enregistrer dans le dossier voix et dans la base de donnée. Donc si une texte 
-doit être transformer en voix pour une deuxième fois, il va être lut sur l'ordinateur local sans passer par le service 
-Google-Text-to-speech.
+L'interface s'ouvre sur http://localhost:8049. Clique sur « Réveiller Joi » et autorise le micro.
+Des écouteurs aident si Joi s'entend elle-même et s'interrompt.
 
-Deux des skills sont issue de deux scripts que j'ai créer précédament, donc il est facile d'insérer d'ajouter des skills.
-Il suffit de créer une fonctiont dans la class Skills. Puis de créer une condition dans la classe Joi, la fonction reveille_toi.
+## Prochaines étapes envisagées
+
+- Mémoire à long terme (SQLite) : se souvenir des conversations précédentes
+- Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat
+- Avatar 2D/3D avec synchronisation des lèvres
+- Application de bureau (Tauri)

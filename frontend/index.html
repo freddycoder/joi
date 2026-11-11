@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Joi</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <canvas id="hologramme"></canvas>
+  <div class="balayage"></div>
+
+  <header>
+    <span class="nom">JOI</span>
+    <span id="etat" class="etat">en veille</span>
+  </header>
+
+  <main id="sous-titres">
+    <p id="ligne-humain" class="humain"></p>
+    <p id="ligne-joi" class="joi"></p>
+  </main>
+
+  <button id="reveiller" class="reveiller">Réveiller Joi</button>
+
+  <form id="clavier" class="clavier" autocomplete="off" hidden>
+    <input id="saisie" type="text" placeholder="Écrire à Joi au lieu de parler…">
+  </form>
+
+  <p id="erreur" class="erreur" hidden></p>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
