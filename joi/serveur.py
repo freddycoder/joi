@@ -19,12 +19,13 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, voix
+from . import config, journal, memoire, voix
 from .cerveau import Cerveau
 from .oreilles import Oreilles, Tour
 
@@ -38,7 +39,25 @@ ORIGINES_AUTORISEES = {
     f"http://127.0.0.1:{config.JOI_PORT}",
 }
 
-app = FastAPI(title="Joi")
+# Tâches de fond (consolidation de la mémoire) : on garde une référence pour qu'elles aillent au bout.
+_taches_de_fond: set[asyncio.Task] = set()
+
+
+def lancer_consolidation() -> None:
+    tache = asyncio.create_task(memoire.consolider())
+    _taches_de_fond.add(tache)
+    tache.add_done_callback(_taches_de_fond.discard)
+
+
+@asynccontextmanager
+async def cycle_de_vie(_app: FastAPI):
+    memoire.initialiser()
+    # Rattrape les échanges non consolidés (par exemple si la fenêtre a été fermée brutalement).
+    lancer_consolidation()
+    yield
+
+
+app = FastAPI(title="Joi", lifespan=cycle_de_vie)
 app.mount("/static", StaticFiles(directory=config.DOSSIER_FRONTEND), name="static")
 
 
@@ -113,6 +132,8 @@ class Conversation:
             await self.interrompre()
             await self.oreilles.fermer()
             await self.cerveau.arreter()
+            # La conversation est finie : Joi range ses souvenirs.
+            lancer_consolidation()
 
     async def traiter_commande(self, brut: str) -> None:
         commande = json.loads(brut)
@@ -149,10 +170,14 @@ class Conversation:
             pass
 
     async def repondre(self, texte: str) -> None:
+        journal.noter("toi", texte)
         await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
+        dites: list[str] = []
+        termine = False
         try:
             async for phrase in self.cerveau.repondre(texte):
+                dites.append(phrase)
                 await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
                 audio = await voix.synthetiser(phrase)
                 if audio:
@@ -160,6 +185,7 @@ class Conversation:
                         await self.envoyer(type="etat", etat="parle")
                         a_parle = True
                     await self.envoyer_audio(audio)
+            termine = True
             await self.envoyer(type="fin_reponse")
         except asyncio.CancelledError:
             raise
@@ -167,3 +193,5 @@ class Conversation:
             log.exception("Erreur pendant la réponse")
             await self.signaler_erreur(f"Oups, j'ai perdu le fil : {e}")
             await self.envoyer(type="etat", etat="ecoute")
+        finally:
+            journal.noter("joi", " ".join(dites), interrompu=not termine)

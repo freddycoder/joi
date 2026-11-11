@@ -18,7 +18,11 @@ JOI_PORT = int(os.getenv("JOI_PORT", "8049"))
 
 DOSSIER_DONNEES = RACINE / "donnees"
 DOSSIER_VOIX = DOSSIER_DONNEES / "voix"
+DOSSIER_JOURNAL = DOSSIER_DONNEES / "journal"
+DOSSIER_MEMOIRE = DOSSIER_DONNEES / "memoire"
 DOSSIER_FRONTEND = RACINE / "frontend"
 FICHIER_PERSONNALITE = Path(__file__).resolve().parent / "personnalite.md"
+FICHIER_BIBLIOTHECAIRE = Path(__file__).resolve().parent / "bibliothecaire.md"
 
-DOSSIER_VOIX.mkdir(parents=True, exist_ok=True)
+for _dossier in (DOSSIER_VOIX, DOSSIER_JOURNAL, DOSSIER_MEMOIRE):
+    _dossier.mkdir(parents=True, exist_ok=True)

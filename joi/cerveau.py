@@ -13,7 +13,7 @@ from copilot import CopilotClient
 from copilot.generated.rpc import PermissionDecisionReject
 from copilot.session_events import SessionEventType
 
-from . import config
+from . import config, memoire
 
 log = logging.getLogger("joi.cerveau")
 
@@ -30,7 +30,7 @@ def couper_phrases(tampon: str) -> tuple[list[str], str]:
 
 
 def refuser_permission(requete, invocation):
-    """Joi ne fait que converser : toute demande d'action (fichiers, terminal...) est refusée."""
+    """Toute demande d'action hors de ses outils (fichiers, terminal...) est refusée."""
     log.warning("Permission refusée : %s", getattr(requete, "kind", requete))
     return PermissionDecisionReject(feedback="Joi n'a pas le droit d'utiliser d'outils.")
 
@@ -49,12 +49,14 @@ class Cerveau:
         self._client = CopilotClient()
         await self._client.start()
         self._session = await self._client.create_session(
-            # Joi n'a aucun outil (fichiers, terminal...) : elle ne fait que converser.
-            available_tools=[],
+            # Joi n'a qu'un outil, se_souvenir : pas de fichiers, pas de terminal.
+            tools=[memoire.outil_se_souvenir],
+            available_tools=[memoire.outil_se_souvenir.name],
             on_permission_request=refuser_permission,
             system_message={
                 "mode": "replace",
-                "content": config.FICHIER_PERSONNALITE.read_text(encoding="utf-8"),
+                "content": config.FICHIER_PERSONNALITE.read_text(encoding="utf-8")
+                + memoire.contexte_reveil(),
             },
             model=config.JOI_MODELE,
             streaming=True,
