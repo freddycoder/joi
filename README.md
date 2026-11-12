@@ -35,6 +35,9 @@ hologramme (réagit au son)
 On peut interrompre Joi en lui parlant par-dessus : elle se tait et écoute.
 On peut aussi lui écrire au clavier (champ en bas de l'écran).
 
+Si Joi comprend mal un nom propre ou un mot inventé (« list d'or » au lieu de « Lysdor »),
+ajoute-le à `JOI_MOTS_CLES` dans `.env`, séparé des autres par des virgules.
+
 ## Prérequis
 
 - Windows, Python 3.12, un navigateur récent (Firefox, Chrome ou Edge)
@@ -74,7 +77,7 @@ donnees/
 - **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité.
 - **En conversation**, elle peut chercher un détail avec l'outil `se_souvenir`
   (dans ses fichiers, puis dans le journal).
-- **Après la conversation** (et au démarrage, pour rattraper un arrêt brutal), une session
+- **Après la conversation** (et 5 minutes après le démarrage si personne ne lui parle, pour rattraper un arrêt brutal), une session
   Copilot séparée relit le journal et range les souvenirs : elle crée, fusionne, déplace et
   corrige des fichiers à sa guise, sans pouvoir sortir de `donnees/memoire/`.
 

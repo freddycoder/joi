@@ -26,7 +26,6 @@ log = logging.getLogger("joi.oreilles")
 
 URL_STREAMING = "wss://streaming.assemblyai.com/v3/ws"
 TAUX_ECHANTILLONNAGE = 16_000
-MOTS_CLES = ["Joi"]
 
 
 @dataclass
@@ -57,8 +56,9 @@ class Oreilles:
             "encoding": "pcm_s16le",
             "speech_model": config.ASSEMBLYAI_MODELE,
             "language_codes": json.dumps(["fr"]),
-            # Mots que la reconnaissance doit privilégier (sinon « Joi » devient « joie »).
-            "keyterms_prompt": json.dumps(MOTS_CLES),
+            # Mots que la reconnaissance doit privilégier (sinon « Joi » devient « joie »,
+            # « Lysdor » devient « list d'or »...). Voir JOI_MOTS_CLES dans .env.
+            "keyterms_prompt": json.dumps(config.MOTS_CLES),
         }
         url = f"{URL_STREAMING}?{urlencode(parametres)}"
         # La clé passe dans l'en-tête Authorization (sans « Bearer »), jamais dans l'URL.

@@ -10,6 +10,8 @@ load_dotenv(RACINE / ".env")
 
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
 ASSEMBLYAI_MODELE = os.getenv("ASSEMBLYAI_MODELE", "universal-3-6-pro").strip()
+# Noms propres et mots inventés que la reconnaissance vocale doit privilégier, séparés par des virgules.
+MOTS_CLES = ["Joi"] + [m.strip() for m in os.getenv("JOI_MOTS_CLES", "").split(",") if m.strip()]
 
 JOI_VOIX = os.getenv("JOI_VOIX", "fr-CA-SylvieNeural").strip()
 JOI_DEBIT = os.getenv("JOI_DEBIT", "+0%").strip()
