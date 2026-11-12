@@ -2,6 +2,14 @@
 
 Le journal n'est jamais modifié après coup : c'est la matière première à partir de laquelle
 la mémoire (dossier Markdown) est consolidée, et il permet de tout reconstruire au besoin.
+
+Deux sortes d'entrées :
+  {"ts", "qui": "toi" | "joi", "texte", "interrompu"?}      une conversation avec Joi
+  {"ts", "qui": "entendu", "locuteur": "A", "texte", "source": "ecoute"}
+      une phrase entendue en mode écoute (voir joi/transcription.py). Elle est ajoutée après coup,
+      à la transcription différée, mais datée du moment où elle a été dite : elle arrive donc dans
+      le fichier après des entrées plus récentes. Ces entrées ne passent pas par le marqueur
+      .consolide.json : leur consolidation suit l'état des segments dans les manifestes d'écoute.
 """
 
 import json
@@ -47,6 +55,27 @@ def noter(qui: str, texte: str, interrompu: bool = False) -> None:
         log.warning("Impossible d'écrire dans le journal : %s", e)
 
 
+def noter_entendu(entrees: list[dict]) -> None:
+    """Ajoute au journal des phrases entendues en mode écoute, chacune dans le fichier du jour où
+    elle a été dite. Une entrée déjà présente (même instant, même texte) n'est pas ajoutée deux fois :
+    la transcription d'un segment peut être reprise après un plantage."""
+    par_jour: dict[str, list[dict]] = {}
+    for entree in entrees:
+        par_jour.setdefault(entree["ts"][:10], []).append(entree)
+    for jour, du_jour in par_jour.items():
+        fichier = config.DOSSIER_JOURNAL / f"{jour}.jsonl"
+        deja = {
+            (e.get("ts"), e.get("texte"))
+            for e in (_lire(fichier) if fichier.exists() else [])
+            if e.get("source") == "ecoute"
+        }
+        nouvelles = [e for e in du_jour if (e["ts"], e["texte"]) not in deja]
+        if not nouvelles:
+            continue
+        with fichier.open("a", encoding="utf-8") as f:
+            f.write("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in nouvelles))
+
+
 def _lire(fichier) -> list[dict]:
     entrees = []
     for ligne in fichier.read_text(encoding="utf-8").splitlines():
@@ -62,13 +91,17 @@ def _fichiers() -> list:
 
 
 def entrees_depuis(ts: str | None) -> list[dict]:
-    """Toutes les entrées strictement postérieures à ts (toutes si ts est None)."""
+    """Les échanges avec Joi strictement postérieurs à ts (tous si ts est None).
+    Les phrases entendues en mode écoute n'en font pas partie."""
     jour = ts[:10] if ts else ""
     entrees = []
     for fichier in _fichiers():
         if fichier.stem < jour:
             continue
-        entrees.extend(e for e in _lire(fichier) if not ts or e.get("ts", "") > ts)
+        entrees.extend(
+            e for e in _lire(fichier)
+            if e.get("source") != "ecoute" and (not ts or e.get("ts", "") > ts)
+        )
     return entrees
 
 
