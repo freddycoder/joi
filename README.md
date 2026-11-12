@@ -17,7 +17,7 @@ micro ──PCM 16 kHz──► /ws ──► oreilles.py ──WebSocket──�
                               cerveau.py ──Copilot SDK──────────────► GitHub Copilot (LLM)
                                    │  réponse, phrase par phrase
                                    ▼
-haut-parleur ◄──MP3──────────  voix.py ──────────────────────────────► edge-tts (voix fr-CA)
+haut-parleur ◄──MP3──────────  voix.py ──────────────────────────────► edge-tts (voix fr-CA) ou AssemblyAI
 hologramme (réagit au son)
 
 Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcription.py ──► AssemblyAI (différé)
@@ -31,7 +31,7 @@ Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcript
 | `joi/oreilles.py` | Transcription en temps réel avec l'API Streaming v3 d'AssemblyAI |
 | `joi/cerveau.py` | Conversation avec Copilot, réponse diffusée et découpée en phrases |
 | `joi/personnalite.md` | La personnalité de Joi (prompt système) : modifie-la librement |
-| `joi/voix.py` | Synthèse vocale, avec cache des phrases déjà prononcées |
+| `joi/voix.py` | Synthèse vocale (edge-tts ou une voix AssemblyAI), avec cache des phrases déjà prononcées |
 | `joi/journal.py` | Journal brut des conversations et des écoutes, mot pour mot, un fichier par jour |
 | `joi/memoire.py` | Mémoire à long terme : contexte au réveil, outil `se_souvenir`, consolidation |
 | `joi/bibliothecaire.md` | Consignes de la passe qui range les souvenirs |
@@ -40,6 +40,10 @@ Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcript
 | `joi/commande_vocale.py` | « Joi, écoute seulement » et « Joi, reviens » |
 | `joi/serveur.py` | Relie le tout, gère les modes et les interruptions |
 | `frontend/` | Interface : hologramme, micro, lecture audio, sous-titres |
+
+**Diagnostics.** `Alt+P` ouvre les paramètres en vigueur (panneau de gauche), `Alt+M` le monitoring
+(panneau de droite : signal du micro et de la voix, temps de réponse, voix, écoute, transcription, mémoire,
+derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'hologramme reste au centre.
 
 On peut interrompre Joi en lui parlant par-dessus : elle se tait et écoute.
 On peut aussi lui écrire au clavier (champ en bas de l'écran).
@@ -88,6 +92,9 @@ Pour la journée à l'atelier : Joi se tait, enregistre ce qu'elle entend, et l'
 L'audio est enregistré localement, en segments de 30 minutes, dans `donnees/enregistrements/`.
 Au retour, chaque segment est transcrit par AssemblyAI (en différé, avec la séparation des voix A, B, C…),
 puis la bibliothécaire en retient ce qui te concerne et écrit un résumé dans `journees/AAAA-MM-JJ.md`.
+Pendant une longue écoute, Joi n'attend pas la fin : après chaque heure d'audio (`JOI_APPRENDRE_MINUTES`,
+arrondi aux segments terminés), elle transcrit et apprend la dernière heure pendant que l'enregistrement
+continue. Au retour, il ne reste que la fin à traiter. `JOI_APPRENDRE_MINUTES=0` revient à tout faire à la fin.
 Si Joi est arrêtée en cours de route, la suite est reprise au prochain démarrage.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.

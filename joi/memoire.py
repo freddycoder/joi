@@ -402,8 +402,10 @@ class Ecoute:
     """Une séance d'écoute (du passage en mode écoute au retour en conversation)."""
 
     debut: str
-    fin: str | None
+    fin: str | None  # pour une séance en cours : la fin de la partie transmise
     segments: list[SegmentEcoute]
+    en_cours: bool = False  # l'écoute continue : d'autres parties suivront
+    deja_en_partie: bool = False  # des parties précédentes ont déjà été transmises
 
 
 def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]]]:
@@ -448,13 +450,19 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                 for ecoute in ecoutes:
                     jour = ecoute.debut[:10]
                     fin = ecoute.fin[11:16] if ecoute.fin else "?"
+                    suite = ""
+                    if ecoute.deja_en_partie:
+                        suite += (" Le début de cette écoute t'a déjà été transmis : il est sans doute "
+                                  "déjà dans le résumé de la journée, ne le répète pas.")
+                    if ecoute.en_cours:
+                        suite += " L'écoute continue : la suite te sera transmise plus tard."
                     tranches = _tranches_ecoute(ecoute)
                     for numero, (texte, rappels) in enumerate(tranches, 1):
                         message = (
                             f"{_etat_memoire()}\n\n"
                             "ATTENTION : ceci est une ÉCOUTE, pas une conversation avec Joi. Joi écoutait "
                             "en silence ce qui se disait autour de la personne (« toi »), "
-                            f"le {jour} de {ecoute.debut[11:16]} à {fin}. "
+                            f"le {jour} de {ecoute.debut[11:16]} à {fin}.{suite} "
                             "Suis la section « Transcriptions d'écoute » de tes consignes. "
                             f"Le résumé de cette journée va dans journees/{jour}.md "
                             "(lis-le d'abord s'il existe, puis complète-le).\n\n"

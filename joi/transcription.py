@@ -1,5 +1,7 @@
-"""La transcription différée du mode écoute : l'audio enregistré est envoyé à AssemblyAI en fin
-d'écoute, avec la reconnaissance des voix, puis ce qui a été entendu est confié à la mémoire.
+"""La transcription différée du mode écoute : l'audio enregistré est envoyé à AssemblyAI, avec la
+reconnaissance des voix, puis ce qui a été entendu est confié à la mémoire. Cela se fait en fin
+d'écoute, et aussi pendant une longue écoute (toutes les JOI_APPRENDRE_MINUTES) pour les segments
+déjà terminés : Joi sait ce qui s'est passé dans la dernière heure sans attendre la fin de la journée.
 
 Le parcours d'un segment (voir le manifeste décrit dans joi/enregistreur.py) :
 
@@ -32,7 +34,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, enregistreur, journal, memoire
+from . import config, enregistreur, journal, memoire, monitoring
 
 log = logging.getLogger("joi.transcription")
 
@@ -68,9 +70,11 @@ async def apprendre() -> None:
 async def transcrire_en_attente() -> None:
     a_faire = [
         (chemin, manifeste, segment)
-        for chemin, manifeste in enregistreur.seances_terminees()
+        for chemin, manifeste, active in enregistreur.seances()
         for segment in manifeste["segments"]
-        if segment.get("etat") in ("enregistre", "en_cours")  # « en_cours » : séance coupée par un plantage
+        # « en_cours » : dans une séance active, le segment qui s'écrit (on n'y touche pas) ;
+        # dans une séance terminée, un segment coupé par un plantage.
+        if segment.get("etat") == "enregistre" or (segment.get("etat") == "en_cours" and not active)
     ]
     if not a_faire:
         return
@@ -98,6 +102,10 @@ async def transcrire_en_attente() -> None:
     secondes = sum(s for s, _ in resultats)
     cout = sum(c for _, c in resultats)
     reussis = sum(1 for chemin, manifeste, segment in a_faire if segment.get("etat") == "transcrit")
+    monitoring.transcription["secondes"] += secondes
+    monitoring.transcription["cout"] += cout
+    monitoring.transcription["segments"] += reussis
+    monitoring.transcription["derniere"] = datetime.now().isoformat(timespec="seconds")
     log.info(
         "Écoute transcrite : %d segment(s) sur %d, %.2f h d'audio facturées, environ %.2f $ US (%.0f s)",
         reussis, len(a_faire), secondes / 3600, cout, time.perf_counter() - debut,
@@ -268,7 +276,7 @@ async def consolider() -> None:
     """Confie à la bibliothécaire les segments transcrits mais pas encore intégrés à la mémoire."""
     dossier = config.DOSSIER_ENREGISTREMENTS
     ecoutes = []
-    for chemin, manifeste in enregistreur.seances_terminees():
+    for chemin, manifeste, active in enregistreur.seances():
         segments = []
         for segment in manifeste["segments"]:
             if segment.get("etat") != "transcrit":
@@ -283,8 +291,19 @@ async def consolider() -> None:
                 entrees=entrees_du_segment(segment, resultat),
                 integre=_marqueur(chemin, manifeste, segment),
             ))
-        if segments:
-            ecoutes.append(memoire.Ecoute(debut=manifeste["debut"], fin=_fin(manifeste), segments=segments))
+        if not segments:
+            continue
+        if active:
+            fin = _fin_segment(_dernier_transcrit(manifeste))
+        else:
+            fin = manifeste.get("fin") or _fin_segment(manifeste["segments"][-1])
+        ecoutes.append(memoire.Ecoute(
+            debut=manifeste["debut"],
+            fin=fin,
+            segments=segments,
+            en_cours=active,
+            deja_en_partie=any(s.get("etat") == "consolide" for s in manifeste["segments"]),
+        ))
     if ecoutes:
         await memoire.consolider_ecoute(ecoutes)
 
@@ -296,13 +315,16 @@ def _marqueur(chemin: Path, manifeste: dict, segment: dict):
     return marquer
 
 
-def _fin(manifeste: dict) -> str | None:
-    """L'heure de fin de la séance ; pour une séance coupée par un plantage, la fin du dernier segment."""
-    if manifeste.get("fin"):
-        return manifeste["fin"]
-    segments = manifeste["segments"]
-    if not segments or not segments[-1].get("duree_s"):
+def _dernier_transcrit(manifeste: dict) -> dict | None:
+    """Le dernier segment déjà transcrit (ou consolidé) d'une séance."""
+    faits = [s for s in manifeste["segments"] if s.get("etat") in ("transcrit", "consolide")]
+    return faits[-1] if faits else None
+
+
+def _fin_segment(segment: dict | None) -> str | None:
+    """L'heure de fin d'un segment. Sert de fin de séance pour une séance coupée par un plantage,
+    ou pour la partie déjà apprise d'une séance toujours en cours."""
+    if not segment or not segment.get("duree_s"):
         return None
-    dernier = segments[-1]
-    fin = datetime.fromisoformat(dernier["debut"]) + timedelta(seconds=dernier["duree_s"])
+    fin = datetime.fromisoformat(segment["debut"]) + timedelta(seconds=segment["duree_s"])
     return fin.isoformat(timespec="seconds")

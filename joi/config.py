@@ -15,10 +15,21 @@ MOTS_CLES = ["Joi"] + [m.strip() for m in os.getenv("JOI_MOTS_CLES", "").split("
 
 JOI_VOIX = os.getenv("JOI_VOIX", "fr-CA-SylvieNeural").strip()
 JOI_DEBIT = os.getenv("JOI_DEBIT", "+0%").strip()
+# Moteur de synthèse vocale : « edge » (edge-tts, par défaut) ou « assemblyai ».
+JOI_TTS = os.getenv("JOI_TTS", "edge").strip().lower() or "edge"
+if JOI_TTS not in ("edge", "assemblyai"):
+    JOI_TTS = "edge"
+# Voix AssemblyAI : slug d'une voix de la bibliothèque (ex. aai-donatien) ou d'une voix créée dans le tableau de bord.
+JOI_VOIX_ASSEMBLYAI = os.getenv("JOI_VOIX_ASSEMBLYAI", "aai-donatien").strip()
+# Langue parlée par la voix AssemblyAI (nom anglais complet : french, english…).
+JOI_LANGUE_ASSEMBLYAI = os.getenv("JOI_LANGUE_ASSEMBLYAI", "french").strip().lower()
 JOI_MODELE = os.getenv("JOI_MODELE", "").strip() or None
 JOI_PORT = int(os.getenv("JOI_PORT", "8049"))
 # Mode écoute : durée des segments audio enregistrés (en minutes).
 JOI_SEGMENT_MINUTES = float(os.getenv("JOI_SEGMENT_MINUTES", "30"))
+# Mode écoute : Joi apprend ce qu'elle a entendu sans attendre la fin de l'écoute, dès que ce volume
+# d'audio est enregistré (en minutes, compté en segments terminés). 0 = seulement en fin d'écoute.
+JOI_APPRENDRE_MINUTES = float(os.getenv("JOI_APPRENDRE_MINUTES", "60") or 0)
 # Mode écoute : modèle(s) de la transcription différée, par ordre de préférence (séparés par des virgules).
 ASSEMBLYAI_MODELES_DIFFERES = [
     m.strip() for m in os.getenv("ASSEMBLYAI_MODELES_DIFFERES", "universal-3-5-pro").split(",") if m.strip()
