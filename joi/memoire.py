@@ -178,8 +178,8 @@ outil_se_souvenir = define_tool(
     "se_souvenir",
     description=(
         "Cherche dans ta mémoire à long terme et dans le journal de vos conversations passées. "
-        "Utilise-le quand on évoque une personne, un événement ou un détail que tu ne trouves pas "
-        "dans ce que tu sais déjà."
+        "Chaque recherche fait attendre la personne : utilise-le seulement pour un souvenir précis "
+        "du passé qui n'est pas dans ce que tu sais déjà, jamais pour du bavardage."
     ),
     handler=lambda p, _: souvenir(p.recherche),
     params_type=ParametresSouvenir,

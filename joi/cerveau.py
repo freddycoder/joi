@@ -22,6 +22,13 @@ FIN_DE_PHRASE = re.compile(r"(?<=[.!?…])\s+|\n+")
 FIN_DE_REPONSE = object()
 
 
+class _Recherche(str):
+    """Marqueur produit par repondre() quand Joi fouille sa mémoire (le texte = la recherche)."""
+
+
+RECHERCHE = _Recherche
+
+
 def couper_phrases(tampon: str) -> tuple[list[str], str]:
     """Sépare les phrases complètes du reste encore en cours d'écriture."""
     morceaux = FIN_DE_PHRASE.split(tampon)
@@ -85,13 +92,19 @@ class Cerveau:
         if genre == SessionEventType.ASSISTANT_MESSAGE_DELTA:
             if evenement.data.delta_content:
                 file.put_nowait(evenement.data.delta_content)
+        elif genre == SessionEventType.TOOL_EXECUTION_START:
+            if evenement.data.tool_name == memoire.outil_se_souvenir.name:
+                arguments = evenement.data.arguments or {}
+                file.put_nowait(_Recherche(arguments.get("recherche", "") if isinstance(arguments, dict) else ""))
         elif genre == SessionEventType.SESSION_IDLE:
             file.put_nowait(FIN_DE_REPONSE)
         elif genre == SessionEventType.SESSION_ERROR:
             file.put_nowait(RuntimeError(evenement.data.message))
 
     async def repondre(self, texte: str) -> AsyncIterator[str]:
-        """Envoie ce que la personne a dit et produit la réponse de Joi, phrase par phrase."""
+        """Envoie ce que la personne a dit et produit la réponse de Joi, phrase par phrase.
+
+        Quand Joi fouille sa mémoire, un marqueur RECHERCHE (isinstance) est produit entre les phrases."""
         self._file = asyncio.Queue()
         self._inactif.clear()
         await self._session.send(texte)
@@ -103,6 +116,9 @@ class Cerveau:
                     break
                 if isinstance(morceau, Exception):
                     raise morceau
+                if isinstance(morceau, _Recherche):
+                    yield morceau
+                    continue
                 tampon += morceau
                 phrases, tampon = couper_phrases(tampon)
                 for phrase in phrases:
