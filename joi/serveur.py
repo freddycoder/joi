@@ -19,11 +19,16 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
                                              même si le mode demandé était déjà actif)
     {"type": "erreur", "message": "..."}
 
+Routes HTTP du tableau de bord (panneaux latéraux de l'interface, voir joi/monitoring.py) :
+    GET /api/parametres     les réglages en vigueur (sans la clé API)
+    GET /api/monitoring     l'état des coulisses : voix, transcription, mémoire, écoute, événements
+
 Les deux modes :
   conversation   l'audio part en streaming vers AssemblyAI, Joi répond (mode au réveil)
   ecoute         Joi se tait : la session AssemblyAI est fermée (on ne paie pas) et l'audio est
-                 enregistré sur le disque par joi/enregistreur.py. Au retour en conversation (ou à la
-                 fermeture de l'onglet), joi/transcription.py le transcrit en fond, puis la mémoire
+                 enregistré sur le disque par joi/enregistreur.py. Toutes les JOI_APPRENDRE_MINUTES
+                 d'audio, et au retour en conversation (ou à la fermeture de l'onglet),
+                 joi/transcription.py le transcrit en fond, puis la mémoire
                  l'intègre.
 
 On change de mode avec le bouton de l'interface, ou à la voix : « Joi, écoute seulement » est repéré
@@ -33,17 +38,19 @@ dans la transcription en streaming, « Joi, reviens » est reconnu hors ligne pa
 import asyncio
 import json
 import logging
+import math
 import random
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import commande_vocale, config, journal, memoire, transcription, voix
+from . import commande_vocale, config, enregistreur, journal, memoire, monitoring, transcription, voix
 from .cerveau import RECHERCHE, Cerveau
-from .enregistreur import Enregistreur
+from .enregistreur import OCTETS_PAR_SECONDE, Enregistreur
 from .oreilles import Oreilles, Tour
 
 log = logging.getLogger("joi.serveur")
@@ -71,6 +78,7 @@ DELAI_RATTRAPAGE = 300  # secondes
 # Tâches de fond (consolidation de la mémoire) : on garde une référence pour qu'elles aillent au bout.
 _taches_de_fond: set[asyncio.Task] = set()
 _conversations_actives = 0
+_conversations: set["Conversation"] = set()  # pour le tableau de bord
 
 
 def _en_fond(coroutine) -> None:
@@ -106,6 +114,7 @@ async def _prechauffer_voix() -> None:
 
 @asynccontextmanager
 async def cycle_de_vie(_app: FastAPI):
+    monitoring.installer()
     memoire.initialiser()
     _en_fond(_rattraper_plus_tard())
     _en_fond(_prechauffer_voix())
@@ -122,6 +131,55 @@ app.mount("/static", StaticFiles(directory=config.DOSSIER_FRONTEND), name="stati
 @app.get("/")
 async def accueil():
     return FileResponse(config.DOSSIER_FRONTEND / "index.html")
+
+
+def _verifier_hote(requete: Request) -> None:
+    """Les routes du tableau de bord ne répondent qu'à la page de Joi (pas à un autre site, ni à un
+    nom de domaine qui pointerait vers 127.0.0.1)."""
+    hote = requete.headers.get("host", "")
+    origine = requete.headers.get("origin")
+    if f"http://{hote}" not in ORIGINES_AUTORISEES or (origine and origine not in ORIGINES_AUTORISEES):
+        raise HTTPException(status_code=403)
+
+
+@app.get("/api/parametres")
+async def api_parametres(requete: Request):
+    _verifier_hote(requete)
+    return {"groupes": monitoring.parametres()}
+
+
+@app.get("/api/monitoring")
+async def api_monitoring(requete: Request):
+    _verifier_hote(requete)
+    # Les manifestes vivants des écoutes en cours se lisent ici, sur la boucle qui les modifie.
+    segments = Counter()
+    for _chemin, manifeste, _active in enregistreur.seances():
+        segments.update(s.get("etat", "?") for s in manifeste["segments"])
+    ecoute = {
+        "segments": dict(segments),
+        "seances": [c.etat_ecoute() for c in _conversations if c.enregistreur],
+    }
+    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute}
+
+
+def _etat_disque() -> dict:
+    fichiers_memoire = len(list(config.DOSSIER_MEMOIRE.rglob("*.md")))
+    cache_fichiers, cache_octets = monitoring.taille_dossier(config.DOSSIER_VOIX)
+    return {
+        "serveur": {
+            "depuis_s": round(time.time() - monitoring.DEMARRAGE),
+            "conversations": _conversations_actives,
+            "taches_de_fond": len(_taches_de_fond),
+        },
+        "voix": {**monitoring.voix, "cache_fichiers": cache_fichiers, "cache_octets": cache_octets},
+        "transcription": {**monitoring.transcription, "en_cours": transcription._verrou.locked()},
+        "memoire": {
+            "consolidation_en_cours": memoire._verrou_consolidation.locked(),
+            "derniere_consolidation": journal.derniere_consolidation(),
+            "fichiers": fichiers_memoire,
+        },
+        "evenements": list(monitoring.evenements)[-15:],
+    }
 
 
 @app.websocket("/ws")
@@ -144,6 +202,7 @@ class Conversation:
         self.oreilles = self._nouvelles_oreilles()
         self.mode = "conversation"
         self.enregistreur: Enregistreur | None = None
+        self._audio_non_appris = 0.0  # secondes d'écoute terminées, pas encore confiées à transcription
         self.detecteur_retour: commande_vocale.DetecteurRetour | None = None
         self.tache_reponse: asyncio.Task | None = None
         self.tache_bascule: asyncio.Task | None = None
@@ -170,10 +229,12 @@ class Conversation:
     async def executer(self) -> None:
         global _conversations_actives
         _conversations_actives += 1
+        _conversations.add(self)
         try:
             await self._executer()
         finally:
             _conversations_actives -= 1
+            _conversations.discard(self)
 
     async def _executer(self) -> None:
         if not config.ASSEMBLYAI_API_KEY:
@@ -277,7 +338,8 @@ class Conversation:
         self.mode = "ecoute"
         await self.interrompre()
         await self.oreilles.fermer()
-        enregistreur = Enregistreur()
+        self._audio_non_appris = 0.0
+        enregistreur = Enregistreur(sur_segment_fini=self._segment_fini)
         try:
             enregistreur.ouvrir()
         except OSError as e:
@@ -289,6 +351,38 @@ class Conversation:
         self.detecteur_retour = commande_vocale.DetecteurRetour(sur_retour=self._retour_vocal)
         self.detecteur_retour.demarrer()
         await self.envoyer(type="etat", etat="ecoute")
+
+    def _segment_fini(self, duree_s: float) -> None:
+        """Un segment d'écoute vient de se terminer : après assez d'audio, Joi l'apprend sans
+        attendre la fin de l'écoute, pendant que l'enregistrement continue."""
+        if config.JOI_APPRENDRE_MINUTES <= 0:
+            return
+        self._audio_non_appris += duree_s
+        if self._audio_non_appris >= config.JOI_APPRENDRE_MINUTES * 60:
+            log.info("Écoute : %.0f min d'audio en attente, Joi les apprend sans attendre la fin.",
+                     self._audio_non_appris / 60)
+            self._audio_non_appris = 0.0
+            _en_fond(transcription.apprendre())
+
+    def etat_ecoute(self) -> dict:
+        """La séance d'écoute en cours, pour le tableau de bord."""
+        e = self.enregistreur
+        courant = e._octets_segment / OCTETS_PAR_SECONDE
+        termines = sum(s.get("duree_s") or 0 for s in e.manifeste["segments"][:-1])
+        prochaine = None
+        if config.JOI_APPRENDRE_MINUTES > 0:
+            # L'analyse part à la fin du premier segment qui fait dépasser le seuil.
+            manque = config.JOI_APPRENDRE_MINUTES * 60 - self._audio_non_appris
+            segments = max(1, math.ceil(manque / e.duree_segment_s))
+            prochaine = round(segments * e.duree_segment_s - courant)
+        return {
+            "debut": e.manifeste.get("debut"),
+            "audio_s": round(termines + courant),
+            "segment_courant_s": round(courant),
+            "duree_segment_s": e.duree_segment_s,
+            "non_appris_s": round(self._audio_non_appris + courant),
+            "prochaine_analyse_s": prochaine,
+        }
 
     async def _revenir_en_conversation(self) -> None:
         await self._arreter_detecteur()

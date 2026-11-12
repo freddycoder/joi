@@ -26,12 +26,17 @@ Le manifeste :
 dans le segment a été dite à debut + start_ms. Un segment resté « en_cours » dans une séance qui
 n'est plus active vient d'un plantage : son MP3 est lisible jusqu'au dernier paquet écrit.
 
+Les segments déjà terminés d'une séance encore en cours peuvent être transcrits sans attendre la
+fin de l'écoute (toutes les JOI_APPRENDRE_MINUTES). Pour que l'enregistreur et la transcription ne
+s'écrasent pas l'un l'autre, ils travaillent alors sur le même manifeste en mémoire (seances()).
+
 La suite (états « transcrit », « consolide » et « echec », et les champs « transcription »,
 « id_transcription », « essais », « erreur ») est gérée par joi/transcription.py.
 """
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -49,8 +54,8 @@ DEBIT_MP3_KBPS = 32
 TAILLE_TAMPON = OCTETS_PAR_SECONDE
 
 
-# Les manifestes des séances en cours d'enregistrement : la transcription ne doit pas y toucher.
-_seances_actives: set[Path] = set()
+# Les séances en cours d'enregistrement, avec leur manifeste vivant (celui que l'enregistreur modifie).
+_seances_actives: dict[Path, dict] = {}
 
 
 def _horodatage(instant: datetime) -> str:
@@ -76,27 +81,45 @@ def sauver_manifeste(chemin: Path, manifeste: dict) -> None:
         log.warning("Manifeste d'écoute non sauvegardé : %s", e)
 
 
-def seances_terminees(dossier: Path | None = None) -> list[tuple[Path, dict]]:
-    """Les séances qui ne sont plus en cours d'enregistrement (finies ou interrompues par un
-    plantage), de la plus ancienne à la plus récente, avec leur manifeste."""
+def seances(dossier: Path | None = None) -> list[tuple[Path, dict, bool]]:
+    """Toutes les séances, de la plus ancienne à la plus récente : (manifeste sur le disque,
+    manifeste, en cours ?). Pour une séance en cours, c'est le manifeste vivant de l'enregistreur :
+    son dernier segment (« en_cours ») est en train d'être écrit et ne doit pas être touché."""
     dossier = dossier or config.DOSSIER_ENREGISTREMENTS
-    seances = []
+    resultat = []
     for chemin in sorted(dossier.glob("????-??-??/seance-*.json")):
-        if chemin.resolve() in _seances_actives:
+        vivant = _seances_actives.get(chemin.resolve())
+        if vivant is not None:
+            resultat.append((chemin, vivant, True))
             continue
         manifeste = lire_manifeste(chemin)
         if manifeste is not None:
-            seances.append((chemin, manifeste))
-    seances.sort(key=lambda s: s[1].get("debut", ""))
-    return seances
+            resultat.append((chemin, manifeste, False))
+    resultat.sort(key=lambda s: s[1].get("debut", ""))
+    return resultat
+
+
+def seances_terminees(dossier: Path | None = None) -> list[tuple[Path, dict]]:
+    """Les séances qui ne sont plus en cours d'enregistrement (finies ou interrompues par un
+    plantage), de la plus ancienne à la plus récente, avec leur manifeste."""
+    return [(chemin, manifeste) for chemin, manifeste, active in seances(dossier) if not active]
 
 
 class Enregistreur:
-    """Une séance d'écoute. ecrire() reçoit le PCM du micro, fermer() finalise le tout."""
+    """Une séance d'écoute. ecrire() reçoit le PCM du micro, fermer() finalise le tout.
 
-    def __init__(self, dossier: Path | None = None, duree_segment_s: float | None = None):
+    sur_segment_fini(duree_s) est appelé chaque fois qu'un segment se termine pendant l'écoute
+    (pas à la fermeture) : le segment est alors prêt à être transcrit."""
+
+    def __init__(
+        self,
+        dossier: Path | None = None,
+        duree_segment_s: float | None = None,
+        sur_segment_fini: Callable[[float], None] | None = None,
+    ):
         self.dossier = dossier or config.DOSSIER_ENREGISTREMENTS
         self.duree_segment_s = duree_segment_s or config.JOI_SEGMENT_MINUTES * 60
+        self.sur_segment_fini = sur_segment_fini
         self.manifeste: dict = {}
         self.fichier_manifeste: Path | None = None
         self._encodeur: lameenc.Encoder | None = None
@@ -114,11 +137,11 @@ class Enregistreur:
         jour.mkdir(parents=True, exist_ok=True)
         self.fichier_manifeste = _chemin_libre(jour, f"seance-{maintenant:%H%M%S}", ".json")
         self.manifeste = {"debut": maintenant.isoformat(timespec="seconds"), "fin": None, "segments": []}
-        _seances_actives.add(self.fichier_manifeste.resolve())
+        _seances_actives[self.fichier_manifeste.resolve()] = self.manifeste
         try:
             self._nouveau_segment()
         except OSError:
-            _seances_actives.discard(self.fichier_manifeste.resolve())
+            _seances_actives.pop(self.fichier_manifeste.resolve(), None)
             self.fichier_manifeste = None
             raise
         log.info("Écoute : enregistrement dans %s", self.fichier_manifeste.parent)
@@ -132,8 +155,13 @@ class Enregistreur:
         if len(self._tampon) >= TAILLE_TAMPON:
             self._vider_tampon()
         if self._octets_segment >= self.duree_segment_s * OCTETS_PAR_SECONDE:
-            self._finir_segment()
+            duree = self._finir_segment()
             self._nouveau_segment()
+            if duree and self.sur_segment_fini:
+                try:
+                    self.sur_segment_fini(duree)
+                except Exception:
+                    log.exception("Fin de segment mal signalée")
 
     def fermer(self) -> None:
         if not self.ouvert:
@@ -147,7 +175,7 @@ class Enregistreur:
             log.info("Écoute terminée : %d segment(s), %.1f min d'audio",
                      len(self.manifeste["segments"]), duree / 60)
         finally:
-            _seances_actives.discard(self.fichier_manifeste.resolve())
+            _seances_actives.pop(self.fichier_manifeste.resolve(), None)
             self.fichier_manifeste = None
 
     # ---------- Segments ----------
@@ -188,9 +216,10 @@ class Enregistreur:
             return
         self._octets_segment += len(donnees)
 
-    def _finir_segment(self) -> None:
+    def _finir_segment(self) -> float:
+        """Termine le segment en cours. Renvoie sa durée en secondes (0 s'il était vide)."""
         if self._encodeur is None:
-            return
+            return 0.0
         try:
             if self._octets_segment:  # lameenc refuse flush() si rien n'a été encodé
                 self._mp3.write(self._encodeur.flush())
@@ -207,10 +236,11 @@ class Enregistreur:
             (self.dossier / segment["fichier"]).unlink(missing_ok=True)
             self.manifeste["segments"].pop()
             self._sauver_manifeste()
-            return
+            return 0.0
         segment["duree_s"] = round(self._octets_segment / OCTETS_PAR_SECONDE, 2)
         segment["etat"] = "enregistre"
         self._sauver_manifeste()
+        return segment["duree_s"]
 
     def _sauver_manifeste(self) -> None:
         sauver_manifeste(self.fichier_manifeste, self.manifeste)

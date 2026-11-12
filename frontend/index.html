@@ -34,6 +34,75 @@
 
   <p id="erreur" class="erreur" hidden></p>
 
+  <!-- Panneaux de diagnostic : Alt+P (paramètres), Alt+M (monitoring), Alt+I (les deux), Échap (fermer) -->
+  <aside id="panneau-parametres" class="panneau gauche" aria-label="Paramètres" inert>
+    <div class="panneau-entete">
+      <span class="panneau-code">SYS.01</span>
+      <h2>Paramètres</h2>
+      <kbd>Alt+P</kbd>
+    </div>
+    <div id="parametres" class="panneau-corps">
+      <p class="vide">Chargement…</p>
+    </div>
+    <div class="panneau-corps panneau-pied">
+      <section>
+        <h3>Navigateur</h3>
+        <dl id="parametres-navigateur"></dl>
+      </section>
+      <section>
+        <h3>Raccourcis</h3>
+        <dl>
+          <dt>Paramètres</dt><dd><kbd>Alt+P</kbd></dd>
+          <dt>Monitoring</dt><dd><kbd>Alt+M</kbd></dd>
+          <dt>Les deux</dt><dd><kbd>Alt+I</kbd></dd>
+          <dt>Fermer</dt><dd><kbd>Échap</kbd></dd>
+        </dl>
+      </section>
+    </div>
+  </aside>
+
+  <aside id="panneau-monitoring" class="panneau droite" aria-label="Monitoring" inert>
+    <div class="panneau-entete">
+      <span class="panneau-code">SYS.02</span>
+      <h2>Monitoring</h2>
+      <kbd>Alt+M</kbd>
+    </div>
+    <div class="panneau-corps">
+      <section>
+        <h3>Signal</h3>
+        <canvas id="oscilloscope" class="oscilloscope" height="56"></canvas>
+        <p class="legende"><span class="micro">■ micro</span> <span class="sortie">■ voix de Joi</span></p>
+      </section>
+      <section>
+        <h3>Session</h3>
+        <dl id="mon-session"></dl>
+      </section>
+      <section>
+        <h3>Voix</h3>
+        <dl id="mon-voix"></dl>
+      </section>
+      <section>
+        <h3>Écoute</h3>
+        <dl id="mon-ecoute"></dl>
+        <div id="mon-progression" class="progression" hidden><span></span></div>
+      </section>
+      <section>
+        <h3>Transcription &amp; mémoire</h3>
+        <dl id="mon-memoire"></dl>
+      </section>
+      <section>
+        <h3>Serveur</h3>
+        <dl id="mon-serveur"></dl>
+      </section>
+      <section>
+        <h3>Événements</h3>
+        <ol id="mon-evenements" class="evenements"></ol>
+      </section>
+    </div>
+  </aside>
+
+  <p id="astuce" class="astuce"><kbd>Alt+I</kbd> diagnostics</p>
+
   <script src="/static/app.js" type="module"></script>
 </body>
 </html>
