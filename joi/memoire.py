@@ -3,16 +3,21 @@
 - Au réveil, index.md et toi.md sont ajoutés à son prompt système (aucune latence).
 - Pendant la conversation, l'outil se_souvenir cherche dans la mémoire et le journal.
 - Après une conversation, une passe de consolidation (session Copilot séparée, « la bibliothécaire »)
-  relit le journal et réorganise les fichiers. Chaque passe est enregistrée dans un dépôt git
-  local (donnees/memoire/.git, sans remote) : on peut voir ou annuler ce qu'elle a changé.
+  relit le journal et réorganise les fichiers. Après une écoute, la même bibliothécaire reçoit la
+  transcription de ce qui a été entendu (voir joi/transcription.py et consolider_ecoute).
+- Chaque passe est enregistrée dans un dépôt git local (donnees/memoire/.git, sans remote) :
+  on peut voir ou annuler ce qu'elle a changé.
 """
 
 import asyncio
 import logging
 import shutil
 import subprocess
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 from pydantic import BaseModel, Field
 from copilot import CopilotClient, define_tool
@@ -163,10 +168,9 @@ def souvenir(recherche: str) -> str:
         extrait = "\n".join(lignes[j] for j in retenues if lignes[j].strip())
         resultats.append(f"[mémoire : {_relatif(fichier)}]\n{extrait}")
 
-    # 2. Journal : les échanges récents mot pour mot.
+    # 2. Journal : les échanges récents mot pour mot (et ce qui a été entendu en mode écoute).
     for entree in journal.chercher(mots, limite=8):
-        qui = "toi" if entree.get("qui") == "toi" else "Joi"
-        resultats.append(f"[journal {entree['ts'][:16].replace('T', ' ')}] {qui} : {entree['texte']}")
+        resultats.append(f"[journal {_quand(entree)}] {_qui(entree)} : {entree['texte']}")
 
     if not resultats:
         return "Aucun souvenir trouvé pour cette recherche."
@@ -174,12 +178,26 @@ def souvenir(recherche: str) -> str:
     return texte[:TAILLE_MAX_SOUVENIR] + ("\n[…]" if len(texte) > TAILLE_MAX_SOUVENIR else "")
 
 
+def _quand(entree: dict) -> str:
+    return entree.get("ts", "")[:16].replace("T", " ")
+
+
+def _qui(entree: dict) -> str:
+    """« toi », « Joi », ou « [entendu, voix A] » pour une phrase captée en mode écoute :
+    l'étiquette de voix n'est pas un nom, et ce n'est pas forcément la personne qui parle."""
+    if entree.get("qui") == "entendu":
+        return f"[entendu, voix {entree.get('locuteur') or '?'}]"
+    return "toi" if entree.get("qui") == "toi" else "Joi"
+
+
 outil_se_souvenir = define_tool(
     "se_souvenir",
     description=(
         "Cherche dans ta mémoire à long terme et dans le journal de vos conversations passées. "
         "Chaque recherche fait attendre la personne : utilise-le seulement pour un souvenir précis "
-        "du passé qui n'est pas dans ce que tu sais déjà, jamais pour du bavardage."
+        "du passé qui n'est pas dans ce que tu sais déjà, jamais pour du bavardage. "
+        "Les lignes « [entendu, voix A] » ont été captées pendant que tu écoutais en silence : "
+        "la voix A n'est pas forcément la personne, et ce n'était pas une conversation avec toi."
     ),
     handler=lambda p, _: souvenir(p.recherche),
     params_type=ParametresSouvenir,
@@ -294,13 +312,54 @@ def _tranches(entrees: list[dict]) -> list[list[dict]]:
     return tranches
 
 
+def _ligne(e: dict) -> str:
+    qui = "Toi" if e.get("qui") == "toi" else _qui(e)
+    coupe = " (interrompue)" if e.get("interrompu") else ""
+    return f"[{_quand(e)}] {qui}{coupe} : {e['texte']}"
+
+
 def _transcrire(entrees: list[dict]) -> str:
-    lignes = []
-    for e in entrees:
-        qui = "Toi" if e.get("qui") == "toi" else "Joi"
-        coupe = " (interrompue)" if e.get("interrompu") else ""
-        lignes.append(f"[{e['ts'][:16].replace('T', ' ')}] {qui}{coupe} : {e['texte']}")
-    return "\n".join(lignes)
+    return "\n".join(_ligne(e) for e in entrees)
+
+
+@asynccontextmanager
+async def _bibliothecaire():
+    """Une session Copilot avec les seuls outils de la mémoire et les consignes de la bibliothécaire."""
+    client = CopilotClient()
+    session = None
+    try:
+        await client.start()
+        session = await client.create_session(
+            tools=OUTILS_BIBLIOTHECAIRE,
+            available_tools=[o.name for o in OUTILS_BIBLIOTHECAIRE],
+            on_permission_request=_refuser_permission,
+            system_message={
+                "mode": "replace",
+                "content": config.FICHIER_BIBLIOTHECAIRE.read_text(encoding="utf-8"),
+            },
+            model=config.JOI_MODELE,
+            skip_custom_instructions=True,
+            working_directory=str(config.DOSSIER_DONNEES),
+        )
+        yield session
+    finally:
+        if session:
+            try:
+                await session.disconnect()
+            except Exception:
+                pass
+        try:
+            await client.stop()
+        except Exception:
+            pass
+
+
+def _etat_memoire() -> str:
+    return (
+        f"Nous sommes le {date.today().isoformat()}.\n\n"
+        f"Fichiers actuels de la mémoire :\n{lister()}\n\n"
+        f"Contenu actuel de index.md :\n{lire('index.md')}"
+    )
 
 
 async def consolider() -> None:
@@ -312,44 +371,101 @@ async def consolider() -> None:
         if not entrees:
             return
         log.info("Consolidation de %d échanges dans la mémoire…", len(entrees))
-        client = CopilotClient()
-        session = None
         try:
-            await client.start()
-            session = await client.create_session(
-                tools=OUTILS_BIBLIOTHECAIRE,
-                available_tools=[o.name for o in OUTILS_BIBLIOTHECAIRE],
-                on_permission_request=_refuser_permission,
-                system_message={
-                    "mode": "replace",
-                    "content": config.FICHIER_BIBLIOTHECAIRE.read_text(encoding="utf-8"),
-                },
-                model=config.JOI_MODELE,
-                skip_custom_instructions=True,
-                working_directory=str(config.DOSSIER_DONNEES),
-            )
-            for tranche in _tranches(entrees):
-                message = (
-                    f"Nous sommes le {date.today().isoformat()}.\n\n"
-                    f"Fichiers actuels de la mémoire :\n{lister()}\n\n"
-                    f"Contenu actuel de index.md :\n{lire('index.md')}\n\n"
-                    f"Nouveaux échanges à intégrer :\n{_transcrire(tranche)}"
-                )
-                await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
-                journal.marquer_consolide(tranche[-1]["ts"])
+            async with _bibliothecaire() as session:
+                for tranche in _tranches(entrees):
+                    message = f"{_etat_memoire()}\n\nNouveaux échanges à intégrer :\n{_transcrire(tranche)}"
+                    await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
+                    journal.marquer_consolide(tranche[-1]["ts"])
             log.info("Mémoire consolidée.")
         except Exception:
             log.exception("Consolidation de la mémoire interrompue")
         finally:
-            if session:
-                try:
-                    await session.disconnect()
-                except Exception:
-                    pass
-            try:
-                await client.stop()
-            except Exception:
-                pass
             await asyncio.to_thread(
                 _enregistrer_version, f"Consolidation jusqu'à {journal.derniere_consolidation()}"
             )
+
+
+# --- Consolidation d'une écoute ---------------------------------------------------------------
+
+@dataclass
+class SegmentEcoute:
+    """Un segment d'écoute transcrit : ses phrases, et quoi faire une fois qu'il est intégré."""
+
+    debut: str  # heure réelle du début de l'enregistrement
+    entrees: list[dict]
+    integre: Callable[[], None]
+
+
+@dataclass
+class Ecoute:
+    """Une séance d'écoute (du passage en mode écoute au retour en conversation)."""
+
+    debut: str
+    fin: str | None
+    segments: list[SegmentEcoute]
+
+
+def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]]]:
+    """Découpe la transcription d'une séance en messages, et associe à chacun les segments dont
+    il contient la fin : on les marque intégrés une fois le message traité par la bibliothécaire."""
+    lignes: list[tuple[str, Callable[[], None] | None]] = []
+    for segment in ecoute.segments:
+        heure = segment.debut[11:16]
+        lignes.append((f"--- Nouveau segment, à partir de {heure} : les étiquettes de voix recommencent ---", None))
+        lignes.extend((_ligne(e), None) for e in segment.entrees)
+        if not segment.entrees:
+            lignes.append(("(rien d'intelligible)", None))
+        lignes[-1] = (lignes[-1][0], segment.integre)
+
+    tranches, courante, rappels, taille = [], [], [], 0
+    for texte, rappel in lignes:
+        if courante and taille + len(texte) + 1 > TAILLE_MAX_TRANCHE:
+            tranches.append(("\n".join(courante), rappels))
+            courante, rappels, taille = [], [], 0
+        courante.append(texte)
+        taille += len(texte) + 1
+        if rappel:
+            rappels.append(rappel)
+    if courante:
+        tranches.append(("\n".join(courante), rappels))
+    return tranches
+
+
+async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
+    """Intègre à la mémoire ce qui a été entendu pendant des séances d'écoute déjà transcrites."""
+    ecoutes = [e for e in ecoutes if e.segments]
+    if not ecoutes:
+        return
+    if _verrou_consolidation.locked():
+        log.info("Consolidation en cours : l'écoute attendra son tour.")
+    async with _verrou_consolidation:
+        phrases = sum(len(s.entrees) for e in ecoutes for s in e.segments)
+        log.info("Consolidation de %d séance(s) d'écoute (%d phrases) dans la mémoire…",
+                 len(ecoutes), phrases)
+        try:
+            async with _bibliothecaire() as session:
+                for ecoute in ecoutes:
+                    jour = ecoute.debut[:10]
+                    fin = ecoute.fin[11:16] if ecoute.fin else "?"
+                    tranches = _tranches_ecoute(ecoute)
+                    for numero, (texte, rappels) in enumerate(tranches, 1):
+                        message = (
+                            f"{_etat_memoire()}\n\n"
+                            "ATTENTION : ceci est une ÉCOUTE, pas une conversation avec Joi. Joi écoutait "
+                            "en silence ce qui se disait autour de la personne (« toi »), "
+                            f"le {jour} de {ecoute.debut[11:16]} à {fin}. "
+                            "Suis la section « Transcriptions d'écoute » de tes consignes. "
+                            f"Le résumé de cette journée va dans journees/{jour}.md "
+                            "(lis-le d'abord s'il existe, puis complète-le).\n\n"
+                            f"Transcription (partie {numero} de {len(tranches)}) :\n{texte}"
+                        )
+                        await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
+                        for rappel in rappels:
+                            rappel()
+            log.info("Écoute consolidée dans la mémoire.")
+        except Exception:
+            log.exception("Consolidation de l'écoute interrompue")
+        finally:
+            debuts = ", ".join(e.debut[:16].replace("T", " ") for e in ecoutes)
+            await asyncio.to_thread(_enregistrer_version, f"Écoute du {debuts}")

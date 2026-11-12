@@ -11,6 +11,7 @@ const LIBELLES = {
   reflechit: "réfléchit",
   parle: "parle",
 };
+const LIBELLE_MODE_ECOUTE = "écoute seule";
 
 // Apparence de l'hologramme selon l'état : couleur, vitesse de rotation, luminosité, agitation.
 const APPARENCES = {
@@ -20,8 +21,11 @@ const APPARENCES = {
   reflechit: { couleur: [155, 123, 255], vitesse: 1.1, lumiere: 0.9, agitation: 0.3 },
   parle: { couleur: [255, 111, 200], vitesse: 0.35, lumiere: 1.0, agitation: 0.08 },
 };
+// En mode écoute, l'hologramme est atténué, quel que soit l'état.
+const APPARENCE_MODE_ECOUTE = { couleur: [95, 216, 255], vitesse: 0.06, lumiere: 0.22, agitation: 0.0 };
 
 let etat = "veille";
+let mode = "conversation"; // conversation | ecoute (confirmé par le serveur)
 let ws = null;
 let reponseFinie = true;
 let texteJoi = "";
@@ -30,9 +34,13 @@ let texteJoi = "";
 
 function changerEtat(nouvel) {
   etat = nouvel;
+  afficherEtat();
+}
+
+function afficherEtat() {
   const el = $("etat");
-  el.textContent = LIBELLES[nouvel] ?? nouvel;
-  el.dataset.etat = nouvel;
+  el.textContent = mode === "ecoute" && etat === "ecoute" ? LIBELLE_MODE_ECOUTE : LIBELLES[etat] ?? etat;
+  el.dataset.etat = etat;
 }
 
 function afficherErreur(message) {
@@ -110,11 +118,15 @@ function verifierFinParole() {
 // ---------- Micro ----------
 
 let analyseurMicro;
+let pisteMicro;
+
+function contraintesMicro(annulerEcho) {
+  return { channelCount: 1, echoCancellation: annulerEcho, noiseSuppression: true, autoGainControl: true };
+}
 
 async function demarrerMicro() {
-  const flux = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  const flux = await navigator.mediaDevices.getUserMedia({ audio: contraintesMicro(true) });
+  pisteMicro = flux.getAudioTracks()[0];
   // Contexte à 16 kHz : le navigateur rééchantillonne le micro au format attendu par AssemblyAI.
   const ctxMicro = new AudioContext({ sampleRate: 16000 });
   await ctxMicro.audioWorklet.addModule("/static/micro-worklet.js");
@@ -129,6 +141,91 @@ async function demarrerMicro() {
   analyseurMicro.fftSize = 512;
   source.connect(analyseurMicro);
 }
+
+// ---------- Mode écoute ----------
+
+let verrouEcran = null;
+let debutEnregistrement = 0;
+let minuterieEnregistrement = null;
+
+// Wake Lock : empêche l'écran (et donc le PC) de se mettre en veille pendant l'écoute.
+// Le navigateur relâche le verrou quand l'onglet est caché : on le reprend quand il revient.
+async function garderEcranAllume() {
+  if (!("wakeLock" in navigator) || verrouEcran || document.visibilityState !== "visible") return;
+  try {
+    verrouEcran = await navigator.wakeLock.request("screen");
+    verrouEcran.addEventListener("release", () => (verrouEcran = null));
+    if (mode !== "ecoute") relacherEcran(); // revenu en conversation pendant la demande
+  } catch (e) {
+    console.warn("Wake Lock refusé :", e);
+  }
+}
+
+function relacherEcran() {
+  verrouEcran?.release().catch(() => {});
+  verrouEcran = null;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (mode === "ecoute") garderEcranAllume();
+});
+
+// Joi ne parle pas en mode écoute : pas d'écho à annuler, et sans l'annulation d'écho
+// le micro capte mieux les voix éloignées. À valider dans l'atelier (voir la console).
+// applyConstraints remplace toutes les contraintes : on les redonne toutes.
+async function reglerMicro(annulerEcho) {
+  if (!pisteMicro) return;
+  try {
+    await pisteMicro.applyConstraints(contraintesMicro(annulerEcho));
+  } catch (e) {
+    console.warn("Réglage du micro impossible :", e);
+  }
+  console.info("Micro :", pisteMicro.getSettings());
+}
+
+function afficherDureeEnregistrement() {
+  const s = Math.floor((Date.now() - debutEnregistrement) / 1000);
+  const deux = (n) => String(n).padStart(2, "0");
+  $("duree-enregistrement").textContent =
+    `${deux(Math.floor(s / 3600))}:${deux(Math.floor(s / 60) % 60)}:${deux(s % 60)}`;
+}
+
+function appliquerMode(nouveau) {
+  const avant = mode;
+  mode = nouveau;
+  document.body.dataset.mode = mode;
+  const bouton = $("mode");
+  bouton.disabled = false;
+  bouton.textContent = mode === "ecoute" ? "revenir" : LIBELLE_MODE_ECOUTE;
+  bouton.title = mode === "ecoute"
+    ? "Revenir en conversation avec Joi (ou dis « Joi, reviens »)"
+    : "Joi se tait et enregistre ce qu'elle entend (ou dis « Joi, écoute seulement »)";
+  $("clavier").hidden = mode === "ecoute" || !ws || ws.readyState !== WebSocket.OPEN;
+  afficherEtat();
+  if (mode === avant) return;
+
+  if (mode === "ecoute") {
+    $("ligne-humain").textContent = "";
+    $("ligne-joi").textContent = "";
+    debutEnregistrement = Date.now();
+    afficherDureeEnregistrement();
+    minuterieEnregistrement = setInterval(afficherDureeEnregistrement, 1000);
+    $("enregistrement").hidden = false;
+    garderEcranAllume();
+    reglerMicro(false);
+  } else {
+    clearInterval(minuterieEnregistrement);
+    $("enregistrement").hidden = true;
+    relacherEcran();
+    reglerMicro(true);
+  }
+}
+
+$("mode").addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  $("mode").disabled = true; // jusqu'à la confirmation du serveur
+  ws.send(JSON.stringify({ type: "mode", mode: mode === "ecoute" ? "conversation" : "ecoute" }));
+});
 
 // ---------- Connexion au serveur ----------
 
@@ -165,6 +262,10 @@ function connecter() {
         couperAudio();
         if (etat === "parle") changerEtat("ecoute");
         break;
+      case "mode":
+        appliquerMode(msg.mode);
+        $("mode").hidden = false;
+        break;
       case "erreur":
         afficherErreur(msg.message);
         break;
@@ -172,10 +273,12 @@ function connecter() {
   };
 
   ws.onclose = () => {
+    appliquerMode("conversation");
     changerEtat("veille");
     couperAudio();
     $("reveiller").hidden = false;
     $("clavier").hidden = true;
+    $("mode").hidden = true;
   };
 }
 
@@ -248,12 +351,12 @@ function dessiner(maintenant) {
   const t = maintenant / 1000;
 
   // Transition douce vers l'apparence de l'état courant.
-  const cible = APPARENCES[etat] ?? APPARENCES.veille;
+  const cible = mode === "ecoute" ? APPARENCE_MODE_ECOUTE : APPARENCES[etat] ?? APPARENCES.veille;
   const k = 1 - Math.exp(-dt * 3);
   for (const cle of ["vitesse", "lumiere", "agitation"]) apparence[cle] += (cible[cle] - apparence[cle]) * k;
   for (let i = 0; i < 3; i++) apparence.couleur[i] += (cible.couleur[i] - apparence.couleur[i]) * k;
 
-  const brut = etat === "parle" ? niveauSonore(analyseurSortie) : etat === "ecoute" ? niveauSonore(analyseurMicro) * 0.6 : 0;
+  const brut = etat === "parle" ? niveauSonore(analyseurSortie) : etat === "ecoute" ? niveauSonore(analyseurMicro) * (mode === "ecoute" ? 0.3 : 0.6) : 0;
   niveauLisse += (brut - niveauLisse) * (brut > niveauLisse ? 0.5 : 0.12);
 
   rotation += apparence.vitesse * dt;

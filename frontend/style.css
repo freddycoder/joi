@@ -59,6 +59,49 @@ header {
 .etat[data-etat="ecoute"] { color: var(--cyan); }
 .etat[data-etat="reflechit"] { color: var(--violet); }
 .etat[data-etat="parle"] { color: var(--rose); }
+body[data-mode="ecoute"] .etat { color: var(--discret); }
+
+.statut { display: flex; align-items: baseline; gap: 18px; }
+
+/* Bouton de mode : discret, pour ne pas inviter à le toucher par erreur */
+.mode {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--discret);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.3s, border-color 0.3s;
+}
+.mode:hover { color: var(--texte); border-color: rgba(255, 255, 255, 0.3); }
+.mode:focus-visible { outline: 2px solid var(--rose); outline-offset: 3px; }
+.mode:disabled { opacity: 0.5; cursor: wait; }
+
+/* Indicateur d'enregistrement, en mode écoute */
+.enregistrement {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--erreur);
+  letter-spacing: 0.15em;
+  font-variant-numeric: tabular-nums;
+}
+.enregistrement[hidden] { display: none; }
+.enregistrement .point {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff4d4d;
+  box-shadow: 0 0 8px #ff4d4d;
+  animation: pulsation 1.6s ease-in-out infinite;
+}
+@keyframes pulsation { 50% { opacity: 0.25; } }
+
+body[data-mode="ecoute"] #sous-titres { opacity: 0.35; }
 
 #sous-titres {
   position: fixed;

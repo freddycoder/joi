@@ -4,7 +4,9 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
 
   navigateur -> serveur
     binaire                                  audio du micro, PCM 16 bits mono 16 kHz
-    {"type": "texte", "texte": "..."}        message tapé au clavier (au lieu de parler)
+    {"type": "texte", "texte": "..."}        message tapé au clavier (au lieu de parler) ; ignoré en mode écoute
+    {"type": "mode", "mode": "..."}          demande de changer de mode : conversation | ecoute
+                                             (on peut aussi le dire : voir joi/commande_vocale.py)
 
   serveur -> navigateur
     binaire                                  une phrase de Joi, en MP3
@@ -13,7 +15,19 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
     {"type": "reponse", "texte": "..."}      une phrase de Joi (sous-titre)
     {"type": "fin_reponse"}                  Joi a fini d'envoyer sa réponse
     {"type": "stop_audio"}                   couper l'audio en cours (interruption)
+    {"type": "mode", "mode": "..."}          le mode en vigueur (envoyé au réveil et à chaque changement,
+                                             même si le mode demandé était déjà actif)
     {"type": "erreur", "message": "..."}
+
+Les deux modes :
+  conversation   l'audio part en streaming vers AssemblyAI, Joi répond (mode au réveil)
+  ecoute         Joi se tait : la session AssemblyAI est fermée (on ne paie pas) et l'audio est
+                 enregistré sur le disque par joi/enregistreur.py. Au retour en conversation (ou à la
+                 fermeture de l'onglet), joi/transcription.py le transcrit en fond, puis la mémoire
+                 l'intègre.
+
+On change de mode avec le bouton de l'interface, ou à la voix : « Joi, écoute seulement » est repéré
+dans la transcription en streaming, « Joi, reviens » est reconnu hors ligne par Vosk.
 """
 
 import asyncio
@@ -27,8 +41,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, journal, memoire, voix
+from . import commande_vocale, config, journal, memoire, transcription, voix
 from .cerveau import RECHERCHE, Cerveau
+from .enregistreur import Enregistreur
 from .oreilles import Oreilles, Tour
 
 log = logging.getLogger("joi.serveur")
@@ -65,15 +80,18 @@ def _en_fond(coroutine) -> None:
 
 
 def lancer_consolidation() -> None:
+    """Range les souvenirs : la conversation qui vient de finir, et les écoutes en attente."""
     _en_fond(memoire.consolider())
+    _en_fond(transcription.apprendre())
 
 
 async def _rattraper_plus_tard() -> None:
-    """Rattrape les échanges non consolidés (par exemple si la fenêtre a été fermée brutalement),
+    """Rattrape les échanges non consolidés (par exemple si la fenêtre a été fermée brutalement)
+    et les écoutes pas encore transcrites (Joi arrêtée pendant une écoute ou une transcription),
     mais seulement quand personne ne parle à Joi : sinon, la fin de la conversation s'en chargera."""
     await asyncio.sleep(DELAI_RATTRAPAGE)
     if _conversations_actives == 0:
-        await memoire.consolider()
+        await asyncio.gather(memoire.consolider(), transcription.apprendre())
 
 
 async def _prechauffer_voix() -> None:
@@ -91,6 +109,9 @@ async def cycle_de_vie(_app: FastAPI):
     memoire.initialiser()
     _en_fond(_rattraper_plus_tard())
     _en_fond(_prechauffer_voix())
+    # Télécharge le modèle de « Joi, reviens » dès maintenant (une seule fois), pour qu'il soit prêt
+    # à la première écoute.
+    _en_fond(commande_vocale.preparer())
     yield
 
 
@@ -120,9 +141,17 @@ class Conversation:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         self.cerveau = Cerveau()
-        self.oreilles = Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
+        self.oreilles = self._nouvelles_oreilles()
+        self.mode = "conversation"
+        self.enregistreur: Enregistreur | None = None
+        self.detecteur_retour: commande_vocale.DetecteurRetour | None = None
         self.tache_reponse: asyncio.Task | None = None
+        self.tache_bascule: asyncio.Task | None = None
+        self._verrou_mode = asyncio.Lock()
         self._verrou_envoi = asyncio.Lock()
+
+    def _nouvelles_oreilles(self) -> Oreilles:
+        return Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
 
     async def envoyer(self, **message) -> None:
         async with self._verrou_envoi:
@@ -162,6 +191,7 @@ class Conversation:
             await self.ws.close()
             return
         log.info("Joi est réveillée en %.1f s", time.perf_counter() - debut)
+        await self.envoyer(type="mode", mode=self.mode)
         await self.envoyer(type="etat", etat="ecoute")
 
         try:
@@ -170,24 +200,131 @@ class Conversation:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes"):
-                    await self.oreilles.envoyer_audio(message["bytes"])
+                    if self.enregistreur:
+                        self.enregistreur.ecrire(message["bytes"])
+                        if self.detecteur_retour:
+                            self.detecteur_retour.ecouter(message["bytes"])
+                    else:
+                        await self.oreilles.envoyer_audio(message["bytes"])
                 elif message.get("text"):
                     await self.traiter_commande(message["text"])
         except WebSocketDisconnect:
             pass
         finally:
+            if self.tache_bascule:
+                self.tache_bascule.cancel()
             await self.interrompre()
+            await self._arreter_detecteur()
+            # Fermer l'onglet en mode écoute finalise le segment en cours.
+            self._arreter_enregistrement()
             await self.oreilles.fermer()
             await self.cerveau.arreter()
-            # La conversation est finie : Joi range ses souvenirs.
+            # La conversation est finie : Joi range ses souvenirs (et transcrit l'écoute, s'il y en a une).
             lancer_consolidation()
 
     async def traiter_commande(self, brut: str) -> None:
         commande = json.loads(brut)
-        if commande.get("type") == "texte" and commande.get("texte", "").strip():
-            await self.sur_tour(Tour(commande["texte"].strip(), True, -1))
+        genre = commande.get("type")
+        if genre == "texte" and commande.get("texte", "").strip():
+            if self.mode == "conversation":
+                await self.sur_tour(Tour(commande["texte"].strip(), True, -1))
+        elif genre == "mode" and commande.get("mode") in ("conversation", "ecoute"):
+            await self.changer_mode(commande["mode"])
+
+    async def changer_mode(self, mode: str) -> None:
+        # Le bouton et la voix peuvent demander un changement en même temps : un seul à la fois.
+        async with self._verrou_mode:
+            if mode != self.mode:
+                if mode == "ecoute":
+                    await self._passer_en_ecoute()
+                else:
+                    await self._revenir_en_conversation()
+            await self.envoyer(type="mode", mode=self.mode)
+
+    def _basculer_en_fond(self, mode: str, confirmation: str | None = None) -> None:
+        """Change de mode dans une tâche à part : une commande vocale arrive des oreilles (ou du
+        détecteur), qu'on doit justement fermer pendant le changement."""
+        if self.tache_bascule and not self.tache_bascule.done():
+            return
+
+        async def basculer() -> None:
+            await self.changer_mode(mode)
+            if confirmation and self.mode == mode:
+                await self.dire_seule(confirmation)
+
+        self.tache_bascule = asyncio.create_task(basculer())
+
+    async def _retour_vocal(self) -> None:
+        # Joi confirme à voix haute : on ne regarde pas forcément l'écran quand on la rappelle.
+        self._basculer_en_fond("conversation", confirmation="Je suis là.")
+
+    async def dire_seule(self, phrase: str) -> None:
+        """Une courte phrase de Joi, hors d'une réponse du cerveau."""
+        try:
+            audio = await voix.synthetiser(phrase)
+        except Exception as e:
+            log.warning("Synthèse impossible : %s", e)
+            return
+        if audio:
+            await self.envoyer(type="reponse", texte=phrase)
+            await self.envoyer(type="etat", etat="parle")
+            await self.envoyer_audio(audio)
+            await self.envoyer(type="fin_reponse")
+
+    async def _passer_en_ecoute(self) -> None:
+        # Le mode change d'abord : un tour final qui arriverait pendant la fermeture des oreilles
+        # ne doit pas déclencher de réponse.
+        self.mode = "ecoute"
+        await self.interrompre()
+        await self.oreilles.fermer()
+        enregistreur = Enregistreur()
+        try:
+            enregistreur.ouvrir()
+        except OSError as e:
+            log.exception("Enregistrement impossible")
+            await self.signaler_erreur(f"Je n'arrive pas à enregistrer : {e}")
+            await self._revenir_en_conversation()
+            return
+        self.enregistreur = enregistreur
+        self.detecteur_retour = commande_vocale.DetecteurRetour(sur_retour=self._retour_vocal)
+        self.detecteur_retour.demarrer()
+        await self.envoyer(type="etat", etat="ecoute")
+
+    async def _revenir_en_conversation(self) -> None:
+        await self._arreter_detecteur()
+        if self._arreter_enregistrement():
+            # L'écoute est finie : Joi l'apprend en fond pendant que la conversation reprend.
+            _en_fond(transcription.apprendre())
+        self.mode = "conversation"
+        await self.envoyer(type="etat", etat="eveil")
+        # Une nouvelle session AssemblyAI recommence la numérotation des tours : nouvelles oreilles.
+        self.oreilles = self._nouvelles_oreilles()
+        try:
+            await self.oreilles.ouvrir()
+        except Exception as e:
+            log.exception("Réouverture des oreilles impossible")
+            await self.signaler_erreur(f"Je n'arrive plus à t'entendre : {e}")
+        await self.envoyer(type="etat", etat="ecoute")
+
+    async def _arreter_detecteur(self) -> None:
+        detecteur, self.detecteur_retour = self.detecteur_retour, None
+        if detecteur:
+            await detecteur.arreter()
+
+    def _arreter_enregistrement(self) -> bool:
+        """Finalise la séance d'écoute en cours. Renvoie True s'il y en avait une."""
+        enregistreur, self.enregistreur = self.enregistreur, None
+        if not enregistreur:
+            return False
+        try:
+            enregistreur.fermer()
+        except Exception:
+            log.exception("Finalisation de l'enregistrement impossible")
+        return True
 
     async def sur_tour(self, tour: Tour) -> None:
+        if self.mode != "conversation":
+            return
         await self.envoyer(type="transcription", texte=tour.texte, final=tour.final)
 
         if not tour.final:
@@ -197,6 +334,10 @@ class Conversation:
             return
 
         if not tour.texte:
+            return
+        if commande_vocale.demande_ecoute(tour.texte):
+            log.info("Commande vocale : « %s »", tour.texte)
+            self._basculer_en_fond("ecoute")
             return
         await self.interrompre()
         self.tache_reponse = asyncio.create_task(self.repondre(tour.texte))

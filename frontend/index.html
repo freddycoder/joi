@@ -12,7 +12,13 @@
 
   <header>
     <span class="nom">JOI</span>
-    <span id="etat" class="etat">en veille</span>
+    <div class="statut">
+      <span id="enregistrement" class="enregistrement" hidden title="Joi enregistre ce qu'elle entend">
+        <span class="point"></span><span id="duree-enregistrement">00:00:00</span>
+      </span>
+      <span id="etat" class="etat">en veille</span>
+      <button id="mode" class="mode" type="button" hidden>écoute seule</button>
+    </div>
   </header>
 
   <main id="sous-titres">
