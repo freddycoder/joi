@@ -14,13 +14,25 @@ Le parcours d'un segment (voir le manifeste décrit dans joi/enregistreur.py) :
    si Joi est arrêtée pendant l'attente, on reprend la même transcription au lieu de payer deux fois.
 2. Le résultat brut est gardé à côté de l'audio (HHMMSS.json). C'est la source de vérité pour la
    suite. La transcription est ensuite effacée des serveurs d'AssemblyAI (avec l'audio envoyé).
-3. Les phrases (« utterances ») deviennent des entrées du journal, datées de l'heure réelle où
-   elles ont été dites : début du segment + start (ms). Le segment passe à « transcrit » et,
-   sauf si JOI_GARDER_AUDIO=oui, le MP3 est supprimé.
-4. La bibliothécaire reçoit les segments transcrits, séance par séance (memoire.consolider_ecoute).
-   Chaque segment passe à « consolide » une fois intégré. On ne passe pas par le marqueur
-   .consolide.json du journal : les phrases d'une écoute sont datées dans le passé et seraient
-   ignorées si une conversation plus récente avait déjà été consolidée.
+3. Les voix sont reconnues sur l'ordinateur (joi/empreintes.py), tant que le MP3 existe encore :
+   « toi », ou un groupe « inconnu-HHMMSS-n » (HHMMSS.voix.json). Sans PyTorch, ou avec
+   JOI_RECONNAISSANCE_VOIX=non, on garde les étiquettes A/B d'AssemblyAI.
+4. Les phrases (« utterances ») deviennent des entrées du journal, datées de l'heure réelle où
+   elles ont été dites : début du segment + start (ms). Une phrase où l'on reconnaît plusieurs
+   voix est découpée. Le segment passe à « transcrit » et, sauf si JOI_GARDER_AUDIO=oui, le MP3
+   est supprimé.
+5. La bibliothécaire reçoit les segments transcrits, séance par séance (memoire.consolider_ecoute).
+   Juste avant, les groupes inconnus de chaque segment sont rattachés aux voix de la journée
+   (« voix inconnue N »). Chaque segment passe à « consolide » une fois intégré. On ne passe pas
+   par le marqueur .consolide.json du journal : les phrases d'une écoute sont datées dans le passé
+   et seraient ignorées si une conversation plus récente avait déjà été consolidée.
+6. Le soir (JOI_FIN_JOURNEE), une fois toute la journée consolidée : le bilan des voix va dans le
+   résumé de la journée, et les empreintes anonymes du jour sont effacées (fermer_journees). Si
+   l'ordinateur était fermé ou Joi arrêtée, c'est fait au prochain démarrage (joi/serveur.py).
+
+Une journée apprise avant la reconnaissance des voix (ou avec de mauvaises empreintes) peut être
+reprise tant que ses MP3 existent : reconsolider_journee() recalcule ses voix et demande à la
+bibliothécaire de CORRIGER ce qu'elle en avait tiré (python -m joi.empreintes reconsolider AAAA-MM-JJ).
 
 Tout ce qui échoue (réseau, Copilot, arrêt de Joi) est repris au prochain appel d'apprendre().
 """
@@ -34,7 +46,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, enregistreur, journal, memoire, monitoring
+from . import config, empreintes, enregistreur, journal, memoire, monitoring
 
 log = logging.getLogger("joi.transcription")
 
@@ -51,6 +63,7 @@ DELAI_MAX_TRANSCRIPTION = 30 * 60  # au-delà, on abandonne pour cette fois (l'i
 ESSAIS_MAX = 3  # refus d'AssemblyAI avant de classer un segment en échec
 
 _verrou = asyncio.Lock()
+_verrou_bilan = asyncio.Lock()  # le bilan d'une journée ne doit pas s'écrire deux fois
 
 
 async def apprendre() -> None:
@@ -63,6 +76,10 @@ async def apprendre() -> None:
         except Exception:
             log.exception("Transcription de l'écoute interrompue")
         await consolider()
+        try:
+            await fermer_journees()
+        except Exception:
+            log.exception("Bilan des voix de la journée impossible")
 
 
 # --- Transcription -----------------------------------------------------------------------------
@@ -143,7 +160,8 @@ async def _transcrire_segment(
             await _effacer_chez_assemblyai(client, resultat.get("id"))
             facture = _facture(resultat, segment)
 
-        entrees = entrees_du_segment(segment, resultat)
+        voix = await _reconnaitre_voix(mp3, segment, resultat)
+        entrees = entrees_du_segment(segment, resultat, voix)
         journal.noter_entendu(entrees)
 
         segment["etat"] = "transcrit"
@@ -162,6 +180,20 @@ async def _transcrire_segment(
         # Réseau, disque, délai dépassé : le segment reste « enregistre » et sera repris plus tard.
         log.warning("Transcription du segment %s reportée : %s", segment["fichier"], _decrire(e))
     return facture
+
+
+async def _reconnaitre_voix(mp3: Path, segment: dict, resultat: dict) -> dict | None:
+    """Les voix reconnues dans un segment : déjà calculées (reprise après un plantage), ou calculées
+    maintenant, tant que l'audio existe. None si la reconnaissance n'est pas possible : on garde
+    alors les étiquettes d'AssemblyAI. Un échec ne bloque jamais la transcription."""
+    voix = empreintes.lire_voix(segment)
+    if voix is not None or not empreintes.active() or not mp3.exists():
+        return voix
+    try:
+        return await asyncio.to_thread(empreintes.analyser_segment, mp3, segment, resultat)
+    except Exception:
+        log.exception("Reconnaissance des voix du segment %s impossible", segment["fichier"])
+        return None
 
 
 async def _demander(client: httpx.AsyncClient, mp3: Path, segment: dict, sauver) -> dict:
@@ -242,11 +274,15 @@ def _decrire(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def entrees_du_segment(segment: dict, resultat: dict) -> list[dict]:
-    """Les phrases d'une transcription, en entrées de journal datées de l'heure où elles ont été dites."""
+def entrees_du_segment(segment: dict, resultat: dict, voix: dict | None = None) -> list[dict]:
+    """Les phrases d'une transcription, en entrées de journal datées de l'heure où elles ont été dites.
+    Avec les voix reconnues, le locuteur est « toi » ou « inconnu-HHMMSS-n » (sinon l'étiquette A/B
+    d'AssemblyAI), et une phrase qui contient plusieurs voix est découpée."""
     debut = datetime.fromisoformat(segment["debut"])
     phrases = resultat.get("utterances")
-    if phrases is None and (resultat.get("text") or "").strip():
+    if voix is not None:
+        phrases = empreintes.phrases_par_voix(resultat, voix)
+    elif phrases is None and (resultat.get("text") or "").strip():
         # Sans reconnaissance des voix, AssemblyAI ne renvoie que le texte complet.
         phrases = [{"start": 0, "speaker": "?", "text": resultat["text"]}]
 
@@ -276,8 +312,10 @@ async def consolider() -> None:
     """Confie à la bibliothécaire les segments transcrits mais pas encore intégrés à la mémoire."""
     dossier = config.DOSSIER_ENREGISTREMENTS
     ecoutes = []
+    affectations: dict[str, dict] = {}  # par jour : les groupes de chaque segment -> voix du jour
     for chemin, manifeste, active in enregistreur.seances():
         segments = []
+        voix_reconnues = True
         for segment in manifeste["segments"]:
             if segment.get("etat") != "transcrit":
                 continue
@@ -286,13 +324,23 @@ async def consolider() -> None:
             except (KeyError, OSError, json.JSONDecodeError) as e:
                 log.warning("Transcription du segment %s illisible : %s", segment["fichier"], e)
                 continue
+            voix = empreintes.lire_voix(segment)
+            if voix is None:
+                voix_reconnues = False
+            entrees = await _entrees_nommees(segment, resultat, voix, affectations)
             segments.append(memoire.SegmentEcoute(
                 debut=segment["debut"],
-                entrees=entrees_du_segment(segment, resultat),
+                entrees=entrees,
                 integre=_marqueur(chemin, manifeste, segment),
             ))
         if not segments:
             continue
+        legende = ""
+        if voix_reconnues:
+            try:
+                legende = await asyncio.to_thread(empreintes.legende, manifeste["debut"][:10])
+            except Exception:
+                log.exception("Légende des voix de la journée impossible")
         if active:
             fin = _fin_segment(_dernier_transcrit(manifeste))
         else:
@@ -303,9 +351,116 @@ async def consolider() -> None:
             segments=segments,
             en_cours=active,
             deja_en_partie=any(s.get("etat") == "consolide" for s in manifeste["segments"]),
+            voix_reconnues=voix_reconnues,
+            legende_voix=legende,
         ))
     if ecoutes:
         await memoire.consolider_ecoute(ecoutes)
+
+
+async def _entrees_nommees(segment: dict, resultat: dict, voix: dict | None,
+                           affectations: dict[str, dict]) -> list[dict]:
+    """Les entrées d'un segment, avec les voix de la journée : « toi », un prénom (accord au
+    registre), « voix inconnue N ». affectations sert de cache, par jour."""
+    entrees = entrees_du_segment(segment, resultat, voix)
+    if voix is not None:
+        jour = segment["fichier"][:10]
+        if jour not in affectations:
+            affectations[jour] = await asyncio.to_thread(empreintes.rattacher_jour, jour)
+        for entree in entrees:
+            entree["locuteur"] = empreintes.nom_affiche(entree["locuteur"], affectations[jour])
+    return entrees
+
+
+async def fermer_journees(forcer: list[str] | None = None) -> list[str]:
+    """Pour chaque journée finie (après JOI_FIN_JOURNEE, ou passée) et entièrement consolidée : le
+    bilan des voix va dans le résumé de la journée, puis les empreintes anonymes du jour sont
+    effacées. forcer : ces journées-là sont fermées sans attendre l'heure. Renvoie les jours fermés."""
+    fermes = []
+    async with _verrou_bilan:
+        for jour in empreintes.journees_ouvertes():
+            if forcer is not None and jour not in forcer:
+                continue
+            if forcer is None and not empreintes.fin_de_journee_passee(jour):
+                continue
+            if not _journee_terminee(jour):
+                if forcer is not None:
+                    log.warning("Le %s n'est pas entièrement transcrit et consolidé : bilan reporté.", jour)
+                continue
+            texte = await asyncio.to_thread(empreintes.preparer_bilan, jour)
+            if texte:
+                await memoire.noter_voix_du_jour(jour, texte)
+                log.info("Bilan des voix du %s ajouté au résumé de la journée.", jour)
+            await asyncio.to_thread(empreintes.effacer_journee, jour)
+            fermes.append(jour)
+    return fermes
+
+
+async def reconsolider_journee(jour: str) -> None:
+    """Reprend une journée d'écoute déjà apprise, avec les voix reconnues : calcule les voix de ses
+    segments (il faut encore leurs MP3, ou le cache du rejeu), puis la bibliothécaire CORRIGE le
+    résumé et les attributions qu'elle avait tirés des étiquettes A/B. Le journal brut n'est pas
+    réécrit. Le bilan des voix suit, puis les empreintes anonymes du jour sont effacées."""
+    if not empreintes.active():
+        raise RuntimeError(f"reconnaissance des voix indisponible : {empreintes.etat()}")
+    dossier = config.DOSSIER_ENREGISTREMENTS
+    seances = [
+        (chemin, manifeste, [s for s in manifeste["segments"] if s["fichier"].startswith(jour + "/")
+                             and s.get("etat") in ("transcrit", "consolide")])
+        for chemin, manifeste, active in enregistreur.seances() if not active
+    ]
+    seances = [(c, m, segs) for c, m, segs in seances if segs]
+    if not seances:
+        raise RuntimeError(f"aucune écoute transcrite le {jour}")
+
+    # 1. Les voix de chaque segment (avant tout rattachement : l'ordre chronologique compte).
+    resultats: dict[str, dict] = {}
+    for _chemin, _manifeste, segments in seances:
+        for segment in segments:
+            resultat = json.loads((dossier / segment["transcription"]).read_text(encoding="utf-8"))
+            resultats[segment["fichier"]] = resultat
+            if empreintes.lire_voix(segment) is not None:
+                continue
+            mp3 = dossier / segment["fichier"]
+            if not mp3.exists():
+                log.warning("Segment %s : plus d'audio, ses voix ne peuvent pas être reconnues.", segment["fichier"])
+                continue
+            await asyncio.to_thread(empreintes.analyser_segment, mp3, segment, resultat, True)
+
+    # 2. Les séances, avec les voix de la journée, en mode correction.
+    affectations: dict[str, dict] = {}
+    legende = await asyncio.to_thread(empreintes.legende, jour)
+    ecoutes = []
+    for chemin, manifeste, segments in seances:
+        segments_ecoute = []
+        for segment in segments:
+            voix = empreintes.lire_voix(segment)
+            entrees = await _entrees_nommees(segment, resultats[segment["fichier"]], voix, affectations)
+            segments_ecoute.append(memoire.SegmentEcoute(
+                debut=segment["debut"],
+                entrees=entrees,
+                # Un segment pas encore consolidé l'est maintenant ; les autres restent « consolide ».
+                integre=_marqueur(chemin, manifeste, segment) if segment.get("etat") == "transcrit" else (lambda: None),
+            ))
+        ecoutes.append(memoire.Ecoute(
+            debut=manifeste["debut"],
+            fin=manifeste.get("fin") or _fin_segment(manifeste["segments"][-1]),
+            segments=segments_ecoute,
+            voix_reconnues=True,
+            legende_voix=legende,
+            correction=True,
+        ))
+    await memoire.consolider_ecoute(ecoutes)
+
+
+def _journee_terminee(jour: str) -> bool:
+    """Vrai si aucune écoute de ce jour n'est en cours ni en attente de transcription ou de
+    consolidation (le bilan arrive après la dernière consolidation)."""
+    for _chemin, manifeste, active in enregistreur.seances():
+        du_jour = [s for s in manifeste["segments"] if s["fichier"].startswith(jour + "/")]
+        if du_jour and (active or any(s.get("etat") not in ("consolide", "echec") for s in du_jour)):
+            return False
+    return True
 
 
 def _marqueur(chemin: Path, manifeste: dict, segment: dict):

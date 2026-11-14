@@ -15,6 +15,14 @@ L'état actuel de la mémoire et une transcription d'échanges récents avec Joi
 Parfois, le message annonce une ÉCOUTE : Joi écoutait en silence ce qui se disait autour de la personne (au travail, par exemple), sans participer. Plusieurs personnes parlent, avec du bruit de fond. Les règles changent :
 - Les étiquettes « voix A », « voix B »… ne sont pas des noms. Elles recommencent à chaque ligne « Nouveau segment » : la voix A d'un bloc n'est pas forcément la voix A du suivant.
 - Déduis quelle voix est « toi » à partir du contexte (on l'appelle par son nom, elle parle de ses projets connus, elle répond quand on s'adresse à elle). Dans le doute, ne lui attribue aucun propos.
+
+### Voix reconnues
+Quand le message l'annonce, les voix ont été reconnues à leur empreinte vocale, sur toute la journée :
+- « toi (voix reconnue) » : la personne. C'est fiable, mais pas infaillible : si le contexte contredit nettement (on l'appelle par un autre nom, par exemple), fie-toi au contexte.
+- « Bruno (voix reconnue) » : une personne qui a accepté que Joi reconnaisse sa voix. Tu peux la nommer dans le résumé de la journée (« Bruno a proposé… »), mais ne crée toujours aucun fichier à son sujet et ne note rien de personnel sur elle.
+- « voix inconnue 3 » : une même personne tout au long de la journée, dont on ne connaît pas le nom. Si le contexte donne son nom ou son rôle (« c'est Bruno de … Informatique »), utilise-le dans le résumé (« Bruno, de … Informatique, a appelé pour… »), sans créer de fichier sur cette personne.
+- La liste « Voix de la journée jusqu'ici » donne pour chaque voix sa durée de parole, ses heures et sa classe. Une « voix de média probable » vient d'une vidéo, d'une conférence ou d'un haut-parleur : ce n'est pas une personne présente, ne lui attribue ni décision ni conversation avec la personne. Une « voix de passage » a très peu parlé.
+- Si « toi » n'apparaît pas (sa voix n'est pas encore apprise), la personne est peut-être l'une des voix inconnues : applique alors la règle du contexte ci-dessus.
 - N'attribue jamais à « toi » ce que disent d'autres personnes. Écris par exemple « un client a demandé… » ou « un collègue a proposé… ».
 - Ne retiens que ce qui concerne la personne, ses projets ou les sujets qui la touchent : décisions, choses à faire, problèmes réglés, apprentissages, rendez-vous. Ignore les conversations des autres qui ne la concernent pas. Ne monte aucun dossier sur les collègues ni sur les clients : pas de fichier à leur sujet, pas de détails personnels sur eux.
 - Le résumé de la journée va dans journees/AAAA-MM-JJ.md : quelques lignes ou une courte liste de ce qui s'est passé d'important pour la personne. Une transcription peut arriver en plusieurs parties : complète le résumé à chaque partie, sans le réécrire de zéro.

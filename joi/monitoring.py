@@ -9,7 +9,7 @@ import time
 from collections import deque
 from datetime import datetime
 
-from . import config
+from . import config, empreintes
 
 DEMARRAGE = time.time()
 
@@ -71,9 +71,24 @@ def parametres() -> list[dict]:
             ("Garder l'audio", oui_non(config.JOI_GARDER_AUDIO)),
             ("Commandes vocales", oui_non(config.JOI_COMMANDE_VOCALE)),
         ],
+        "Reconnaissance des voix": [
+            ("État", empreintes.etat()),
+            ("Ta voix", _ta_voix()),
+            ("Seuils", f"toi {config.JOI_VOIX_SEUIL_TOI:g} · segment {config.JOI_VOIX_SEUIL_SEGMENT:g} · "
+                       f"journée {config.JOI_VOIX_SEUIL_JOURNEE:g}"),
+            ("Interlocuteur", f"au moins {config.JOI_VOIX_INTERLOCUTEUR_S:g} s"),
+            ("Bilan du soir", empreintes.heure_fin_journee().strftime("%H:%M")),
+        ],
         "Serveur": [("Port", str(config.JOI_PORT))],
     }
     return [{"titre": t, "lignes": [{"nom": n, "valeur": v} for n, v in l]} for t, l in groupes.items()]
+
+
+def _ta_voix() -> str:
+    if not empreintes.active():
+        return "—"
+    profil = next((p for p in empreintes.profils_connus() if p.nom == "toi"), None)
+    return f"{profil.echantillons} échantillon(s)" if profil else "pas encore apprise"
 
 
 def taille_dossier(dossier) -> tuple[int, int]:

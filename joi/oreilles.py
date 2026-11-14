@@ -8,12 +8,18 @@ Fonctionnement :
    - « Turn »        : la transcription du tour de parole en cours. Tant que end_of_turn est faux,
                        c'est une transcription partielle ; quand il passe à vrai, la personne a fini de parler ;
    - « Termination » : la session est terminée.
+
+Les mots d'un tour final (words[], start/end en ms depuis le début de la session) accompagnent le
+Tour : avec le tampon des dernières secondes envoyées (TamponAudio), le serveur retrouve l'audio du
+tour pour apprendre la voix de la personne (voir joi/empreintes.py). Ce tampon ne vit qu'en mémoire.
 """
 
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 from urllib.parse import urlencode
 
@@ -26,6 +32,8 @@ log = logging.getLogger("joi.oreilles")
 
 URL_STREAMING = "wss://streaming.assemblyai.com/v3/ws"
 TAUX_ECHANTILLONNAGE = 16_000
+OCTETS_PAR_MS = TAUX_ECHANTILLONNAGE * 2 // 1000  # PCM 16 bits mono
+DUREE_TAMPON_S = 60
 
 
 @dataclass
@@ -35,6 +43,49 @@ class Tour:
     texte: str
     final: bool
     ordre: int
+    mots: list[dict] = field(default_factory=list)  # tour final : mots avec start/end (ms de session)
+
+
+class TamponAudio:
+    """Les dernières secondes d'audio envoyées à AssemblyAI. Les horodatages d'AssemblyAI comptent
+    en ms depuis le début de la session : on garde la position de chaque paquet dans le flux, et
+    l'instant où il est arrivé (pour savoir si Joi parlait à ce moment-là)."""
+
+    def __init__(self, secondes: float = DUREE_TAMPON_S):
+        self._max = int(secondes * 1000 * OCTETS_PAR_MS)
+        self._paquets: deque[tuple[int, float, bytes]] = deque()  # (position en octets, instant, audio)
+        self._total = 0
+        self._taille = 0
+
+    def ajouter(self, pcm: bytes) -> None:
+        self._paquets.append((self._total, time.monotonic(), pcm))
+        self._total += len(pcm)
+        self._taille += len(pcm)
+        while self._paquets and self._taille - len(self._paquets[0][2]) >= self._max:
+            self._taille -= len(self._paquets.popleft()[2])
+
+    def extraire(self, debut_ms: int, fin_ms: int) -> bytes | None:
+        """L'audio entre deux instants de la session, ou None s'il n'est plus dans le tampon."""
+        if not self._paquets:
+            return None
+        a, b = max(debut_ms, 0) * OCTETS_PAR_MS, fin_ms * OCTETS_PAR_MS
+        if a < self._paquets[0][0] or b <= a:
+            return None
+        morceaux = []
+        for position, _instant, pcm in self._paquets:
+            if position + len(pcm) <= a or position >= b:
+                continue
+            morceaux.append(pcm[max(a - position, 0):min(b - position, len(pcm))])
+        audio = b"".join(morceaux)
+        return audio[:len(audio) - len(audio) % 2]
+
+    def instant(self, ms: int) -> float | None:
+        """L'instant (time.monotonic) où l'audio de ce moment de la session est arrivé."""
+        position = ms * OCTETS_PAR_MS
+        for debut, instant, pcm in self._paquets:
+            if debut <= position < debut + len(pcm):
+                return instant
+        return None
 
 
 class Oreilles:
@@ -49,6 +100,7 @@ class Oreilles:
         self._tache_ecoute: asyncio.Task | None = None
         self._dernier_tour_final = -1
         self._erreur_signalee = False
+        self.tampon = TamponAudio()
 
     async def ouvrir(self) -> None:
         parametres = {
@@ -73,7 +125,8 @@ class Oreilles:
         try:
             await self._ws.send(pcm)
         except ConnectionClosed:
-            pass
+            return
+        self.tampon.ajouter(pcm)
 
     async def fermer(self) -> None:
         if self._ws is None:
@@ -134,7 +187,7 @@ class Oreilles:
                 return
             self._dernier_tour_final = ordre
             texte = message.get("utterance") or message.get("transcript", "")
-            await self._sur_tour(Tour(texte.strip(), True, ordre))
+            await self._sur_tour(Tour(texte.strip(), True, ordre, message.get("words") or []))
         else:
             # Transcription partielle : les mots déjà confirmés + ceux encore en cours.
             mots = message.get("words") or []

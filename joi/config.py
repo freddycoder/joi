@@ -39,15 +39,34 @@ JOI_GARDER_AUDIO = os.getenv("JOI_GARDER_AUDIO", "non").strip().lower() in ("oui
 # Commandes vocales « Joi, écoute seulement » et « Joi, reviens » (la seconde télécharge un modèle Vosk).
 JOI_COMMANDE_VOCALE = os.getenv("JOI_COMMANDE_VOCALE", "oui").strip().lower() in ("oui", "o", "vrai", "true", "1", "yes")
 
+# Reconnaissance des voix du mode écoute (empreintes vocales calculées sur l'ordinateur, voir joi/empreintes.py).
+JOI_RECONNAISSANCE_VOIX = os.getenv("JOI_RECONNAISSANCE_VOIX", "oui").strip().lower() in ("oui", "o", "vrai", "true", "1", "yes")
+# Similarités cosinus (de -1 à 1) : une fenêtre est « toi » au-delà de JOI_VOIX_SEUIL_TOI ; les fenêtres
+# inconnues d'un segment se regroupent au-delà de JOI_VOIX_SEUIL_SEGMENT ; les groupes de deux segments
+# sont la même voix du jour au-delà de JOI_VOIX_SEUIL_JOURNEE. À régler avec « python -m joi.empreintes rejouer ».
+JOI_VOIX_SEUIL_TOI = float(os.getenv("JOI_VOIX_SEUIL_TOI", "0.40"))
+JOI_VOIX_SEUIL_SEGMENT = float(os.getenv("JOI_VOIX_SEUIL_SEGMENT", "0.25"))
+JOI_VOIX_SEUIL_JOURNEE = float(os.getenv("JOI_VOIX_SEUIL_JOURNEE", "0.45"))
+# Parole totale dans la journée (en s) pour compter comme interlocuteur ; en dessous : voix de passage.
+JOI_VOIX_INTERLOCUTEUR_S = float(os.getenv("JOI_VOIX_INTERLOCUTEUR_S", "30"))
+# Fenêtres de parole (en s) : durée minimale et maximale, et silence entre deux mots qui coupe une fenêtre.
+JOI_VOIX_FENETRE_MIN_S = float(os.getenv("JOI_VOIX_FENETRE_MIN_S", "1.5"))
+JOI_VOIX_FENETRE_MAX_S = float(os.getenv("JOI_VOIX_FENETRE_MAX_S", "4"))
+JOI_VOIX_SILENCE_S = float(os.getenv("JOI_VOIX_SILENCE_S", "0.7"))
+# Heure du bilan des voix de la journée ; les empreintes anonymes du jour sont ensuite effacées.
+JOI_FIN_JOURNEE = os.getenv("JOI_FIN_JOURNEE", "18:00").strip() or "18:00"
+
 DOSSIER_DONNEES = RACINE / "donnees"
 DOSSIER_VOIX = DOSSIER_DONNEES / "voix"
 DOSSIER_JOURNAL = DOSSIER_DONNEES / "journal"
 DOSSIER_MEMOIRE = DOSSIER_DONNEES / "memoire"
 DOSSIER_ENREGISTREMENTS = DOSSIER_DONNEES / "enregistrements"
 DOSSIER_VOSK = DOSSIER_DONNEES / "vosk"
+DOSSIER_EMPREINTES = DOSSIER_DONNEES / "empreintes"
+DOSSIER_LOGS = DOSSIER_DONNEES / "logs"
 DOSSIER_FRONTEND = RACINE / "frontend"
 FICHIER_PERSONNALITE = Path(__file__).resolve().parent / "personnalite.md"
 FICHIER_BIBLIOTHECAIRE = Path(__file__).resolve().parent / "bibliothecaire.md"
 
-for _dossier in (DOSSIER_VOIX, DOSSIER_JOURNAL, DOSSIER_MEMOIRE, DOSSIER_ENREGISTREMENTS):
+for _dossier in (DOSSIER_VOIX, DOSSIER_JOURNAL, DOSSIER_MEMOIRE, DOSSIER_ENREGISTREMENTS, DOSSIER_LOGS):
     _dossier.mkdir(parents=True, exist_ok=True)

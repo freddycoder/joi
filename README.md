@@ -22,6 +22,8 @@ hologramme (réagit au son)
 
 Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcription.py ──► AssemblyAI (différé)
                                                                 │
+                                                     empreintes.py (voix, sur l'ordinateur)
+                                                                │
                                                                 ▼
                                                       memoire.py (bibliothécaire Copilot)
 ```
@@ -36,7 +38,8 @@ Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcript
 | `joi/memoire.py` | Mémoire à long terme : contexte au réveil, outil `se_souvenir`, consolidation |
 | `joi/bibliothecaire.md` | Consignes de la passe qui range les souvenirs |
 | `joi/enregistreur.py` | Mode écoute : enregistre le micro en segments MP3 |
-| `joi/transcription.py` | Mode écoute : transcription différée, avec reconnaissance des voix |
+| `joi/transcription.py` | Mode écoute : transcription différée, avec séparation des voix par AssemblyAI |
+| `joi/empreintes.py` | Mode écoute : reconnaissance des voix sur toute la journée (empreintes vocales locales) |
 | `joi/commande_vocale.py` | « Joi, écoute seulement » et « Joi, reviens » |
 | `joi/serveur.py` | Relie le tout, gère les modes et les interruptions |
 | `frontend/` | Interface : hologramme, micro, lecture audio, sous-titres |
@@ -75,7 +78,10 @@ L'interface s'ouvre sur http://localhost:8049. Clique sur « Réveiller Joi » e
 Des écouteurs aident si Joi s'entend elle-même et s'interrompt.
 
 Après une mise à jour du projet, relance `.venv\Scripts\pip install -r requirements.txt`
-(le `.bat` n'installe les dépendances qu'à la création de `.venv`).
+(le `.bat` n'installe les dépendances qu'à la création de `.venv`). La reconnaissance des voix ajoute
+PyTorch (version CPU, environ 1 Go installé) : sans lui, Joi fonctionne, avec les étiquettes A/B d'AssemblyAI.
+
+Le journal technique est gardé dans `donnees/logs/joi.log` (5 fichiers de 2 Mo au plus).
 
 ## Mode écoute
 
@@ -100,6 +106,61 @@ Si Joi est arrêtée en cours de route, la suite est reprise au prochain démarr
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
 Garde l'onglet ouvert et branche le portable.
 
+### Reconnaissance des voix
+
+AssemblyAI sépare les voix (A, B, C…) segment par segment : le « A » de 9 h n'est pas forcément le « A »
+de 14 h. Joi reconnaît donc elle-même les voix sur toute la journée, **sans rien envoyer ailleurs**
+(`joi/empreintes.py`, modèle SpeechBrain ECAPA, ~80 Mo téléchargés une fois) :
+
+- **Ta voix** s'apprend pendant vos conversations : à la fin de chaque tour d'au moins 2 s, l'audio du
+  tour (gardé en mémoire, jamais écrit) donne une empreinte qui affine la tienne (`donnees/empreintes/toi.npz`).
+  Les tours où Joi parle en même temps sont ignorés.
+- **En écoute**, avant que l'audio d'un segment soit effacé, la parole est découpée en fenêtres de 1,5 à 4 s.
+  Chaque fenêtre est comparée à ta voix ; les autres sont regroupées en « voix inconnue 1 », « 2 »…, les
+  mêmes toute la journée. Une phrase où deux voix se suivent est découpée.
+- **Le soir** (`JOI_FIN_JOURNEE`, 18:00 par défaut, ou à la fin de l'écoute si elle déborde), le résumé
+  de la journée reçoit un bilan : « 4 interlocuteurs en plus de toi, et quelques voix de passage ».
+  Une voix qui parle longtemps sans jamais te répondre est une « voix de média probable » (vidéo,
+  conférence) ; moins de 30 s dans la journée (`JOI_VOIX_INTERLOCUTEUR_S`), une « voix de passage ».
+  Ensuite, **toutes les empreintes anonymes du jour sont effacées** : seules les étiquettes restent.
+  Si le portable était fermé à 18:00, ou Joi arrêtée, le bilan est fait dès le prochain démarrage
+  (et Joi revérifie toutes les 15 min) : les empreintes anonymes restent donc au plus jusque-là.
+  Pour le faire tout de suite, sans attendre le soir : `python -m joi.empreintes bilan AAAA-MM-JJ`.
+- **Une journée apprise avant** la reconnaissance des voix (ou avec de mauvaises empreintes) peut être
+  reprise tant que ses MP3 existent : `python -m joi.empreintes reconsolider AAAA-MM-JJ` calcule ses voix,
+  demande à la bibliothécaire de **corriger** le résumé et les attributions (une session Copilot), puis
+  fait le bilan. Le journal brut n'est pas réécrit. Arrête Joi pendant ce temps.
+
+Une empreinte vocale est une donnée biométrique : par défaut, Joi ne garde que la tienne. Pour qu'elle
+reconnaisse un collègue par son nom, il faut **son accord exprès**, inscrit au registre
+`donnees/empreintes/consentements.json` ; le retrait de l'accord efface son empreinte. Les clients restent anonymes.
+
+```
+.venv\Scripts\python -m joi.empreintes consentement ajouter Bruno --facon "accord verbal, en personne"
+.venv\Scripts\python -m joi.empreintes enroler-voix 2026-11-13 2 --nom Bruno --ecouter
+.venv\Scripts\python -m joi.empreintes consentement liste
+.venv\Scripts\python -m joi.empreintes consentement retirer Bruno     efface aussi son empreinte
+```
+
+Refaire `enroler-voix` sur la même journée remplace les échantillons déjà tirés de cette journée : si tu
+t'es trompé de numéro, recommence avec le bon. Attention, les numéros du rejeu changent quand une voix
+devient connue : relance `rejouer` avant de choisir le suivant.
+
+Régler les seuils sur une journée gardée avec `JOI_GARDER_AUDIO=oui`, sans repayer AssemblyAI :
+
+```
+.venv\Scripts\python -m joi.empreintes controle               le modèle reconnaît-il une même voix ?
+.venv\Scripts\python -m joi.empreintes rejouer 2026-11-13     les voix trouvées, avec heures et extraits
+.venv\Scripts\python -m joi.empreintes rejouer 2026-11-13 --seuil-journee 0.55 --details
+.venv\Scripts\python -m joi.empreintes enroler-voix 2026-11-13 2 --ecouter   ta voix = la « voix inconnue 2 » du rejeu : extraits joués, puis confirmation
+.venv\Scripts\python -m joi.empreintes enroler 2026-11-13 12:45:10-12:46:30   ta voix, sur une plage où tu parles seul
+.venv\Scripts\python -m joi.empreintes oublier toi            efface ton empreinte
+.venv\Scripts\python -m joi.empreintes effacer-rejeu          efface le cache du rejeu
+```
+
+Le rejeu n'écrit ni dans le journal ni dans la mémoire ; il garde les empreintes de chaque fenêtre dans
+`donnees/empreintes/rejeu/` pour que les essais suivants soient instantanés (à effacer après les réglages).
+
 **Coûts.** Le streaming n'est pas utilisé en écoute : on ne paie que la transcription différée,
 environ 0,23 $ US de l'heure (modèle Pro et séparation des voix). Une journée de 8 h revient à moins de 2 $.
 La console affiche les heures transcrites et une estimation du coût après chaque écoute.
@@ -119,7 +180,9 @@ dans `donnees/` (ignoré par git, jamais publié) :
 ```
 donnees/
 ├── journal/AAAA-MM-JJ.jsonl   chaque échange et chaque phrase entendue, mot pour mot
-├── enregistrements/           mode écoute : audio en attente et transcriptions brutes
+├── enregistrements/           mode écoute : audio en attente, transcriptions brutes, voix reconnues
+├── empreintes/                ton empreinte vocale, et celles du jour (anonymes, effacées le soir)
+├── logs/                      journal technique de Joi
 └── memoire/                   ses souvenirs en Markdown, organisés librement par Joi
     ├── toi.md                 l'essentiel sur toi, lu à chaque réveil
     ├── index.md               la carte de sa mémoire, lue à chaque réveil
@@ -141,8 +204,15 @@ Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime
 
 ## Prochaines étapes envisagées
 
-- Données structurées (SQLite) : rappels, agenda
-- Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat
-- Reconnaître ta voix d'une journée à l'autre (empreinte vocale)
+P1
+- MCP avec icloud ou outlook avec un adresse courriel appartenant à Joi.
+- Données structurées (SQLite) : rappels, agenda (est-ce nécessaire si on relie avec un courriel cloud?)
+- Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat (à inclure dans le MCP)
+
+P2
+- Remettre JOI_GARDER_AUDIO=non et effacer les MP3 de test et le cache du rejeu.
+
+P3
+- Nommer une voix avec l'accord de la personne (« Joi, voici Denis, il est d'accord »)
 - Avatar 2D/3D avec synchronisation des lèvres
 - Application de bureau (Tauri)
