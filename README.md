@@ -204,9 +204,12 @@ Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime
 
 ## Prochaines étapes envisagées
 
-- Données structurées (SQLite) : rappels, agenda
-- Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat
+P1
+- MCP avec icloud ou outlook avec un adresse courriel appartenant à Joi.
+- Données structurées (SQLite) : rappels, agenda (est-ce nécessaire si on relie avec un courriel cloud?)
+- Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat (à inclure dans le MCP)
+
+P3
 - Nommer une voix avec l'accord de la personne (« Joi, voici Denis, il est d'accord »)
 - Avatar 2D/3D avec synchronisation des lèvres
 - Application de bureau (Tauri)
-- MCP avec icloud ou outlook avec un adresse courriel appartenant à Joi.
