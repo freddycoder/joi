@@ -209,6 +209,9 @@ P1
 - Données structurées (SQLite) : rappels, agenda (est-ce nécessaire si on relie avec un courriel cloud?)
 - Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat (à inclure dans le MCP)
 
+P2
+- Remettre JOI_GARDER_AUDIO=non et effacer les MP3 de test et le cache du rejeu.
+
 P3
 - Nommer une voix avec l'accord de la personne (« Joi, voici Denis, il est d'accord »)
 - Avatar 2D/3D avec synchronisation des lèvres
