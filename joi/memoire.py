@@ -4,7 +4,8 @@
 - Pendant la conversation, l'outil se_souvenir cherche dans la mémoire et le journal.
 - Après une conversation, une passe de consolidation (session Copilot séparée, « la bibliothécaire »)
   relit le journal et réorganise les fichiers. Après une écoute, la même bibliothécaire reçoit la
-  transcription de ce qui a été entendu (voir joi/transcription.py et consolider_ecoute).
+  transcription de ce qui a été entendu (voir joi/transcription.py et consolider_ecoute). Le soir,
+  le bilan des voix entendues s'ajoute au résumé de la journée (noter_voix_du_jour).
 - Chaque passe est enregistrée dans un dépôt git local (donnees/memoire/.git, sans remote) :
   on peut voir ou annuler ce qu'elle a changé.
 """
@@ -183,10 +184,20 @@ def _quand(entree: dict) -> str:
 
 
 def _qui(entree: dict) -> str:
-    """« toi », « Joi », ou « [entendu, voix A] » pour une phrase captée en mode écoute :
-    l'étiquette de voix n'est pas un nom, et ce n'est pas forcément la personne qui parle."""
+    """« toi », « Joi », ou « [entendu, …] » pour une phrase captée en mode écoute. Le locuteur est
+    une étiquette d'AssemblyAI (« voix A » : pas un nom, et pas forcément la personne), ou une voix
+    reconnue sur l'ordinateur : « toi », « voix inconnue 3 » (voir joi/empreintes.py)."""
     if entree.get("qui") == "entendu":
-        return f"[entendu, voix {entree.get('locuteur') or '?'}]"
+        locuteur = entree.get("locuteur") or "?"
+        if locuteur == "toi":
+            return "[entendu, toi (voix reconnue)]"
+        if locuteur.startswith("voix"):
+            return f"[entendu, {locuteur}]"
+        if locuteur.startswith("inconnu-"):
+            return "[entendu, voix inconnue]"
+        if len(locuteur) <= 2:  # étiquette d'AssemblyAI : A, B, ?
+            return f"[entendu, voix {locuteur}]"
+        return f"[entendu, {locuteur} (voix reconnue)]"  # une personne qui a donné son accord
     return "toi" if entree.get("qui") == "toi" else "Joi"
 
 
@@ -196,8 +207,9 @@ outil_se_souvenir = define_tool(
         "Cherche dans ta mémoire à long terme et dans le journal de vos conversations passées. "
         "Chaque recherche fait attendre la personne : utilise-le seulement pour un souvenir précis "
         "du passé qui n'est pas dans ce que tu sais déjà, jamais pour du bavardage. "
-        "Les lignes « [entendu, voix A] » ont été captées pendant que tu écoutais en silence : "
-        "la voix A n'est pas forcément la personne, et ce n'était pas une conversation avec toi."
+        "Les lignes « [entendu, …] » ont été captées pendant que tu écoutais en silence, ce n'était pas "
+        "une conversation avec toi. « [entendu, toi (voix reconnue)] » : la personne, reconnue à sa voix. "
+        "« voix A » ou « voix inconnue » : quelqu'un d'autre, ou la personne si sa voix n'a pas été reconnue."
     ),
     handler=lambda p, _: souvenir(p.recherche),
     params_type=ParametresSouvenir,
@@ -406,6 +418,13 @@ class Ecoute:
     segments: list[SegmentEcoute]
     en_cours: bool = False  # l'écoute continue : d'autres parties suivront
     deja_en_partie: bool = False  # des parties précédentes ont déjà été transmises
+    # Voix reconnues sur l'ordinateur (joi/empreintes.py) : « toi » et « voix inconnue N » valent pour
+    # toute la journée. Sinon, ce sont les étiquettes A/B d'AssemblyAI, qui recommencent à chaque segment.
+    voix_reconnues: bool = False
+    legende_voix: str = ""  # les voix de la journée jusqu'ici (durée, heures, classe)
+    # Une écoute déjà transmise (avec les étiquettes A/B), transmise à nouveau avec les voix
+    # reconnues : la bibliothécaire corrige ce qu'elle en avait tiré au lieu de l'ajouter.
+    correction: bool = False
 
 
 def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]]]:
@@ -414,7 +433,10 @@ def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]
     lignes: list[tuple[str, Callable[[], None] | None]] = []
     for segment in ecoute.segments:
         heure = segment.debut[11:16]
-        lignes.append((f"--- Nouveau segment, à partir de {heure} : les étiquettes de voix recommencent ---", None))
+        if ecoute.voix_reconnues:
+            lignes.append((f"--- Nouveau segment, à partir de {heure} ---", None))
+        else:
+            lignes.append((f"--- Nouveau segment, à partir de {heure} : les étiquettes de voix recommencent ---", None))
         lignes.extend((_ligne(e), None) for e in segment.entrees)
         if not segment.entrees:
             lignes.append(("(rien d'intelligible)", None))
@@ -432,6 +454,22 @@ def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]
     if courante:
         tranches.append(("\n".join(courante), rappels))
     return tranches
+
+
+async def noter_voix_du_jour(jour: str, bilan: str) -> None:
+    """Ajoute le bilan des voix entendues (joi/empreintes.py) à la fin du résumé de la journée."""
+    async with _verrou_consolidation:
+        chemin = f"journees/{jour}.md"
+        fichier = _chemin_md(chemin)
+        if fichier.exists():
+            contenu = fichier.read_text(encoding="utf-8").rstrip()
+            if "\n## Voix entendues" in contenu:  # une écoute après le bilan : on ajoute la suite
+                bilan = bilan.replace("## Voix entendues", "## Voix entendues (suite)", 1)
+        else:
+            contenu = (f"---\ndescription: Résumé de la journée d'écoute du {jour}.\n"
+                       f"mis_a_jour: {jour}\n---\n# Journée du {jour}")
+        await asyncio.to_thread(ecrire, chemin, f"{contenu}\n\n{bilan}")
+        await asyncio.to_thread(_enregistrer_version, f"Voix entendues le {jour}")
 
 
 async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
@@ -456,16 +494,35 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                                   "déjà dans le résumé de la journée, ne le répète pas.")
                     if ecoute.en_cours:
                         suite += " L'écoute continue : la suite te sera transmise plus tard."
+                    if ecoute.voix_reconnues:
+                        suite += (" Les voix ont été reconnues à leur empreinte vocale (voir « Voix reconnues » "
+                                  "dans tes consignes).")
+                        if ecoute.legende_voix:
+                            suite += f"\n\nVoix de la journée jusqu'ici :\n{ecoute.legende_voix}\n"
                     tranches = _tranches_ecoute(ecoute)
                     for numero, (texte, rappels) in enumerate(tranches, 1):
+                        if ecoute.correction:
+                            consigne = (
+                                "Cette écoute t'a DÉJÀ été transmise, mais avec des étiquettes A/B qui "
+                                "recommençaient à chaque segment : tu as pu attribuer à « toi » des propos "
+                                "d'autres personnes. La voici à nouveau, avec les voix reconnues. Ton travail "
+                                f"est de CORRIGER, pas d'ajouter une deuxième fois : relis journees/{jour}.md "
+                                "et réécris-le avec les bonnes attributions (qui a dit, proposé, décidé, "
+                                "appelé). Si tu as mis dans d'autres fichiers (toi.md, projets…) des propos "
+                                "ou des décisions qui venaient en fait d'une autre personne, corrige-les "
+                                "aussi. N'ajoute que ce qui manquait vraiment. Garde la section "
+                                "« Voix entendues » si elle existe. "
+                            )
+                        else:
+                            consigne = (f"Le résumé de cette journée va dans journees/{jour}.md "
+                                        "(lis-le d'abord s'il existe, puis complète-le). ")
                         message = (
                             f"{_etat_memoire()}\n\n"
                             "ATTENTION : ceci est une ÉCOUTE, pas une conversation avec Joi. Joi écoutait "
                             "en silence ce qui se disait autour de la personne (« toi »), "
                             f"le {jour} de {ecoute.debut[11:16]} à {fin}.{suite} "
                             "Suis la section « Transcriptions d'écoute » de tes consignes. "
-                            f"Le résumé de cette journée va dans journees/{jour}.md "
-                            "(lis-le d'abord s'il existe, puis complète-le).\n\n"
+                            f"{consigne}\n\n"
                             f"Transcription (partie {numero} de {len(tranches)}) :\n{texte}"
                         )
                         await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)

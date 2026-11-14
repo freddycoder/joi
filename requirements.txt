@@ -7,3 +7,10 @@ python-dotenv>=1.0
 lameenc>=1.8
 httpx>=0.27
 vosk>=0.3.45
+# Reconnaissance des voix du mode écoute (joi/empreintes.py). Sous Windows, torch est la version CPU.
+torch>=2.4
+torchaudio>=2.4
+speechbrain>=1.0
+soundfile>=0.12
+scipy>=1.11
+numpy>=1.26

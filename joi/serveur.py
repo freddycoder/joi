@@ -7,6 +7,8 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
     {"type": "texte", "texte": "..."}        message tapé au clavier (au lieu de parler) ; ignoré en mode écoute
     {"type": "mode", "mode": "..."}          demande de changer de mode : conversation | ecoute
                                              (on peut aussi le dire : voir joi/commande_vocale.py)
+    {"type": "lecture", "en_cours": bool}    la voix de Joi commence ou finit de jouer dans le
+                                             haut-parleur (pour ne pas apprendre sa voix comme la tienne)
 
   serveur -> navigateur
     binaire                                  une phrase de Joi, en MP3
@@ -33,6 +35,11 @@ Les deux modes :
 
 On change de mode avec le bouton de l'interface, ou à la voix : « Joi, écoute seulement » est repéré
 dans la transcription en streaming, « Joi, reviens » est reconnu hors ligne par Vosk.
+
+Reconnaissance de ta voix (joi/empreintes.py) : à la fin de chaque tour de conversation d'au moins
+2 s, l'audio du tour (gardé en mémoire par les oreilles) donne une empreinte qui affine celle de
+« toi ». L'audio n'est jamais écrit sur le disque. Un tour qui chevauche une lecture de la voix de
+Joi (signalée par le navigateur) est ignoré.
 """
 
 import asyncio
@@ -41,14 +48,14 @@ import logging
 import math
 import random
 import time
-from collections import Counter
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import commande_vocale, config, enregistreur, journal, memoire, monitoring, transcription, voix
+from . import commande_vocale, config, empreintes, enregistreur, journal, memoire, monitoring, transcription, voix
 from .cerveau import RECHERCHE, Cerveau
 from .enregistreur import OCTETS_PAR_SECONDE, Enregistreur
 from .oreilles import Oreilles, Tour
@@ -74,6 +81,12 @@ PHRASES_DE_RECHERCHE = [
 # Délai avant de rattraper, au démarrage, les échanges non consolidés : la consolidation lance
 # une deuxième session Copilot, qui ralentirait le réveil de Joi et ses premières réponses.
 DELAI_RATTRAPAGE = 300  # secondes
+
+# Vérification de la fin de journée (bilan des voix), en secondes.
+INTERVALLE_FIN_DE_JOURNEE = 15 * 60
+
+# Marge autour d'une lecture de la voix de Joi (latence du haut-parleur et du micro), en secondes.
+MARGE_LECTURE = 0.5
 
 # Tâches de fond (consolidation de la mémoire) : on garde une référence pour qu'elles aillent au bout.
 _taches_de_fond: set[asyncio.Task] = set()
@@ -102,6 +115,20 @@ async def _rattraper_plus_tard() -> None:
         await asyncio.gather(memoire.consolider(), transcription.apprendre())
 
 
+async def _surveiller_fin_de_journee() -> None:
+    """Le bilan des voix de chaque journée finie (après JOI_FIN_JOURNEE, ou une journée passée), puis
+    l'effacement de ses empreintes anonymes. Tout de suite au démarrage : le portable était peut-être
+    fermé à l'heure dite, ou Joi arrêtée. Ensuite, une vérification régulière plutôt qu'une minuterie
+    jusqu'au soir, qui se décalerait pendant une mise en veille. Une journée dont une écoute est en
+    cours, ou pas encore apprise, attend : la fin de l'écoute (transcription.apprendre) s'en charge."""
+    while True:
+        try:
+            await transcription.fermer_journees()
+        except Exception:
+            log.exception("Bilan des voix de la journée impossible")
+        await asyncio.sleep(INTERVALLE_FIN_DE_JOURNEE)
+
+
 async def _prechauffer_voix() -> None:
     """Synthétise d'avance les phrases de recherche (elles restent ensuite en cache sur le disque)."""
     for phrase in PHRASES_DE_RECHERCHE:
@@ -121,6 +148,9 @@ async def cycle_de_vie(_app: FastAPI):
     # Télécharge le modèle de « Joi, reviens » dès maintenant (une seule fois), pour qu'il soit prêt
     # à la première écoute.
     _en_fond(commande_vocale.preparer())
+    # Le modèle de reconnaissance des voix (~10 s à charger, téléchargé une fois), prêt au premier tour.
+    _en_fond(asyncio.to_thread(empreintes.preparer))
+    _en_fond(_surveiller_fin_de_journee())
     yield
 
 
@@ -208,6 +238,8 @@ class Conversation:
         self.tache_bascule: asyncio.Task | None = None
         self._verrou_mode = asyncio.Lock()
         self._verrou_envoi = asyncio.Lock()
+        # Les lectures de la voix de Joi dans le navigateur : [début, fin ou None] (time.monotonic).
+        self._lectures: deque[list] = deque(maxlen=50)
 
     def _nouvelles_oreilles(self) -> Oreilles:
         return Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
@@ -291,6 +323,61 @@ class Conversation:
                 await self.sur_tour(Tour(commande["texte"].strip(), True, -1))
         elif genre == "mode" and commande.get("mode") in ("conversation", "ecoute"):
             await self.changer_mode(commande["mode"])
+        elif genre == "lecture":
+            self._noter_lecture(bool(commande.get("en_cours")))
+
+    # ---------- Ta voix ----------
+
+    def _noter_lecture(self, en_cours: bool) -> None:
+        maintenant = time.monotonic()
+        if en_cours:
+            if not self._lectures or self._lectures[-1][1] is not None:
+                self._lectures.append([maintenant, None])
+        elif self._lectures and self._lectures[-1][1] is None:
+            self._lectures[-1][1] = maintenant
+
+    def _joi_parlait(self, debut: float, fin: float) -> bool:
+        maintenant = time.monotonic()
+        return any(
+            d - MARGE_LECTURE <= fin and (f if f is not None else maintenant) + MARGE_LECTURE >= debut
+            for d, f in self._lectures
+        )
+
+    def _apprendre_ma_voix(self, tour: Tour) -> None:
+        """Affine l'empreinte de « toi » avec l'audio de ce tour, s'il est assez long et que Joi ne
+        parlait pas en même temps. L'audio est oublié dès que son empreinte est calculée."""
+        if not tour.mots or not empreintes.active():
+            return
+        plages = empreintes.plages_de_parole(tour.mots)
+        parole_ms = sum(f - d for d, f in plages)
+        if parole_ms < empreintes.ENROLEMENT_MIN_S * 1000:
+            return
+        # Les premières secondes de parole suffisent (et un long monologue ne pèse pas trop).
+        retenues, total = [], 0
+        for d, f in plages:
+            f = min(f, d + int(empreintes.ENROLEMENT_MAX_S * 1000) - total)
+            retenues.append((d, f))
+            total += f - d
+            if total >= empreintes.ENROLEMENT_MAX_S * 1000:
+                break
+        tampon = self.oreilles.tampon
+        debut, fin = tampon.instant(retenues[0][0]), tampon.instant(retenues[-1][1] - 1)
+        if debut is None or fin is None:
+            return
+        if self._joi_parlait(debut, fin):
+            log.debug("Tour non appris : Joi parlait en même temps.")
+            return
+        morceaux = [tampon.extraire(d, f) for d, f in retenues]
+        if any(m is None for m in morceaux):
+            return
+        _en_fond(self._enroler(b"".join(morceaux)))
+
+    @staticmethod
+    async def _enroler(pcm: bytes) -> None:
+        try:
+            await asyncio.to_thread(empreintes.enroler_pcm, pcm)
+        except Exception as e:
+            log.warning("Empreinte de ta voix non mise à jour : %s", e)
 
     async def changer_mode(self, mode: str) -> None:
         # Le bouton et la voix peuvent demander un changement en même temps : un seul à la fois.
@@ -429,6 +516,7 @@ class Conversation:
 
         if not tour.texte:
             return
+        self._apprendre_ma_voix(tour)
         if commande_vocale.demande_ecoute(tour.texte):
             log.info("Commande vocale : « %s »", tour.texte)
             self._basculer_en_fond("ecoute")

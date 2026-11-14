@@ -66,6 +66,15 @@ let generation = 0; // incrémentée à chaque interruption, pour ignorer l'audi
 let chaineDecodage = Promise.resolve();
 const sources = new Set();
 
+// Le serveur apprend ta voix pendant la conversation : il doit savoir quand la voix de Joi joue
+// dans le haut-parleur, pour ne pas la confondre avec la tienne.
+let lectureSignalee = false;
+function signalerLecture(enCours) {
+  if (enCours === lectureSignalee) return;
+  lectureSignalee = enCours;
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "lecture", en_cours: enCours }));
+}
+
 function preparerSortie() {
   ctxSortie = new AudioContext();
   analyseurSortie = ctxSortie.createAnalyser();
@@ -93,8 +102,10 @@ function jouerPhrase(mp3) {
     source.start(debut);
     prochainDebut = debut + audio.duration;
     sources.add(source);
+    signalerLecture(true);
     source.onended = () => {
       sources.delete(source);
+      if (sources.size === 0) signalerLecture(false);
       verifierFinParole();
     };
   });
@@ -107,6 +118,7 @@ function couperAudio() {
   }
   sources.clear();
   prochainDebut = 0;
+  signalerLecture(false);
 }
 
 function verifierFinParole() {
