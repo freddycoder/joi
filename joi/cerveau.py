@@ -26,7 +26,12 @@ class _Recherche(str):
     """Marqueur produit par repondre() quand Joi fouille sa mémoire (le texte = la recherche)."""
 
 
+class _Consultation(str):
+    """Marqueur produit par repondre() quand Joi consulte son compte (le texte = l'outil)."""
+
+
 RECHERCHE = _Recherche
+CONSULTATION = _Consultation
 
 
 def couper_phrases(tampon: str) -> tuple[list[str], str]:
@@ -50,25 +55,39 @@ class Cerveau:
         self._file: asyncio.Queue | None = None
         self._inactif = asyncio.Event()
         self._inactif.set()
+        self._compte = None  # joi.compte.integration.Integration, seulement si JOI_COMPTE est réglé
 
     async def demarrer(self) -> None:
         self._boucle = asyncio.get_running_loop()
         self._client = CopilotClient()
-        await self._client.start()
+        consignes = config.FICHIER_PERSONNALITE.read_text(encoding="utf-8") + memoire.contexte_reveil()
+        # Joi n'a qu'un outil, se_souvenir : pas de fichiers, pas de terminal.
+        outils_permis = [memoire.outil_se_souvenir.name]
+        permission = refuser_permission
+        options = {}
+        if config.JOI_COMPTE:
+            # Le compte (optionnel) : ses outils MCP, ses consignes et le contexte du réveil. Sans
+            # JOI_COMPTE, rien de joi.compte n'est importé et la session reste celle d'avant.
+            from .compte.integration import Integration
+
+            self._compte = Integration(repli=refuser_permission)
+            _, contexte = await asyncio.gather(self._client.start(), self._compte.contexte_reveil())
+            consignes += self._compte.consignes() + contexte
+            outils_permis += self._compte.outils_permis()
+            permission = self._compte.permission
+            options["mcp_servers"] = self._compte.serveurs_mcp()
+        else:
+            await self._client.start()
         self._session = await self._client.create_session(
-            # Joi n'a qu'un outil, se_souvenir : pas de fichiers, pas de terminal.
             tools=[memoire.outil_se_souvenir],
-            available_tools=[memoire.outil_se_souvenir.name],
-            on_permission_request=refuser_permission,
-            system_message={
-                "mode": "replace",
-                "content": config.FICHIER_PERSONNALITE.read_text(encoding="utf-8")
-                + memoire.contexte_reveil(),
-            },
+            available_tools=outils_permis,
+            on_permission_request=permission,
+            system_message={"mode": "replace", "content": consignes},
             model=config.JOI_MODELE,
             streaming=True,
             skip_custom_instructions=True,
             working_directory=str(config.DOSSIER_DONNEES),
+            **options,
         )
         self._session.on(self._sur_evenement)
 
@@ -96,18 +115,32 @@ class Cerveau:
             if evenement.data.tool_name == memoire.outil_se_souvenir.name:
                 arguments = evenement.data.arguments or {}
                 file.put_nowait(_Recherche(arguments.get("recherche", "") if isinstance(arguments, dict) else ""))
+            elif self._compte:
+                from .compte.integration import outil_du_compte
+
+                outil = outil_du_compte(evenement.data.tool_name)
+                if outil:
+                    file.put_nowait(_Consultation(outil))
         elif genre == SessionEventType.SESSION_IDLE:
             file.put_nowait(FIN_DE_REPONSE)
         elif genre == SessionEventType.SESSION_ERROR:
             file.put_nowait(RuntimeError(evenement.data.message))
 
-    async def repondre(self, texte: str) -> AsyncIterator[str]:
+    async def repondre(self, texte: str, systeme: bool = False) -> AsyncIterator[str]:
         """Envoie ce que la personne a dit et produit la réponse de Joi, phrase par phrase.
 
-        Quand Joi fouille sa mémoire, un marqueur RECHERCHE (isinstance) est produit entre les phrases."""
+        Quand Joi fouille sa mémoire, un marqueur RECHERCHE (isinstance) est produit entre les phrases ;
+        quand elle consulte son compte, un marqueur CONSULTATION.
+        systeme : le message ne vient pas de la personne (un courriel reçu, glissé par le serveur)."""
         self._file = asyncio.Queue()
         self._inactif.clear()
-        await self._session.send(texte)
+        if systeme:
+            await self._session.send(texte, source="system")
+        else:
+            if self._compte:
+                # Ton tour de parole : c'est lui qui peut confirmer l'envoi d'un courriel.
+                self._compte.noter_tour(texte)
+            await self._session.send(texte)
         tampon = ""
         try:
             while True:
@@ -116,7 +149,7 @@ class Cerveau:
                     break
                 if isinstance(morceau, Exception):
                     raise morceau
-                if isinstance(morceau, _Recherche):
+                if isinstance(morceau, (_Recherche, _Consultation)):
                     yield morceau
                     continue
                 tampon += morceau

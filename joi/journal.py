@@ -3,13 +3,17 @@
 Le journal n'est jamais modifié après coup : c'est la matière première à partir de laquelle
 la mémoire (dossier Markdown) est consolidée, et il permet de tout reconstruire au besoin.
 
-Deux sortes d'entrées :
+Les sortes d'entrées :
   {"ts", "qui": "toi" | "joi", "texte", "interrompu"?}      une conversation avec Joi
   {"ts", "qui": "entendu", "locuteur": "A", "texte", "source": "ecoute"}
       une phrase entendue en mode écoute (voir joi/transcription.py). Elle est ajoutée après coup,
       à la transcription différée, mais datée du moment où elle a été dite : elle arrive donc dans
       le fichier après des entrées plus récentes. Ces entrées ne passent pas par le marqueur
       .consolide.json : leur consolidation suit l'état des segments dans les manifestes d'écoute.
+  Avec le compte de Joi (joi/compte/, optionnel), en résumé, toujours avec un « texte » lisible :
+  {"ts", "qui": "courriel", "texte", "sens": "recu" | "envoye", "de", "a", "sujet", "resume"}
+  {"ts", "qui": "agenda", "texte", "action": "cree" | "modifie" | "annule", "titre", "debut", "fin", "invites"}
+  {"ts", "qui": "tache", "texte", "action": "ajoutee" | "terminee", "titre"}
 """
 
 import json
@@ -52,6 +56,22 @@ def noter(qui: str, texte: str, interrompu: bool = False) -> None:
         with fichier.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entree, ensure_ascii=False) + "\n")
     except OSError as e:  # un journal raté ne doit pas couper la conversation
+        log.warning("Impossible d'écrire dans le journal : %s", e)
+
+
+def noter_compte(qui: str, texte: str, **champs) -> None:
+    """Une entrée du compte de Joi (qui : « courriel », « agenda » ou « tache »). Le texte, toujours
+    présent, reprend l'essentiel en une phrase : l'entrée reste lisible et cherchable par le code qui
+    ne connaît que « texte », même une fois le compte désactivé."""
+    texte = texte.strip()
+    if not texte:
+        return
+    entree = {"ts": _maintenant(), "qui": qui, "texte": texte, **champs}
+    fichier = config.DOSSIER_JOURNAL / f"{entree['ts'][:10]}.jsonl"
+    try:
+        with fichier.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entree, ensure_ascii=False) + "\n")
+    except OSError as e:
         log.warning("Impossible d'écrire dans le journal : %s", e)
 
 

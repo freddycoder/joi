@@ -198,6 +198,13 @@ def _qui(entree: dict) -> str:
         if len(locuteur) <= 2:  # étiquette d'AssemblyAI : A, B, ?
             return f"[entendu, voix {locuteur}]"
         return f"[entendu, {locuteur} (voix reconnue)]"  # une personne qui a donné son accord
+    # Les entrées du compte de Joi (joi/compte/), lisibles même si le compte a été désactivé depuis.
+    if entree.get("qui") == "courriel":
+        return "[courriel envoyé]" if entree.get("sens") == "envoye" else "[courriel reçu]"
+    if entree.get("qui") == "agenda":
+        return "[agenda]"
+    if entree.get("qui") == "tache":
+        return "[tâche]"
     return "toi" if entree.get("qui") == "toi" else "Joi"
 
 
@@ -334,6 +341,15 @@ def _transcrire(entrees: list[dict]) -> str:
     return "\n".join(_ligne(e) for e in entrees)
 
 
+def _consignes_bibliothecaire() -> str:
+    """Ses consignes, plus celles du compte de Joi s'il est actif (sans compte : inchangées)."""
+    consignes = config.FICHIER_BIBLIOTHECAIRE.read_text(encoding="utf-8")
+    if config.JOI_COMPTE:
+        compte = Path(__file__).resolve().parent / "compte" / "bibliothecaire.md"
+        consignes = consignes.rstrip() + "\n\n" + compte.read_text(encoding="utf-8")
+    return consignes
+
+
 @asynccontextmanager
 async def _bibliothecaire():
     """Une session Copilot avec les seuls outils de la mémoire et les consignes de la bibliothécaire."""
@@ -345,10 +361,7 @@ async def _bibliothecaire():
             tools=OUTILS_BIBLIOTHECAIRE,
             available_tools=[o.name for o in OUTILS_BIBLIOTHECAIRE],
             on_permission_request=_refuser_permission,
-            system_message={
-                "mode": "replace",
-                "content": config.FICHIER_BIBLIOTHECAIRE.read_text(encoding="utf-8"),
-            },
+            system_message={"mode": "replace", "content": _consignes_bibliothecaire()},
             model=config.JOI_MODELE,
             skip_custom_instructions=True,
             working_directory=str(config.DOSSIER_DONNEES),

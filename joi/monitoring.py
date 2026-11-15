@@ -79,9 +79,31 @@ def parametres() -> list[dict]:
             ("Interlocuteur", f"au moins {config.JOI_VOIX_INTERLOCUTEUR_S:g} s"),
             ("Bilan du soir", empreintes.heure_fin_journee().strftime("%H:%M")),
         ],
+        "Compte": _compte(),
         "Serveur": [("Port", str(config.JOI_PORT))],
     }
     return [{"titre": t, "lignes": [{"nom": n, "valeur": v} for n, v in l]} for t, l in groupes.items()]
+
+
+def _compte() -> list[tuple[str, str]]:
+    """Le compte de Joi : « désactivé » sans JOI_COMPTE (et ses réglages ne sont alors pas lus)."""
+    if not config.JOI_COMPTE:
+        if config.JOI_COMPTE_REFUSE:
+            return [("État", f"désactivé (« {config.JOI_COMPTE_REFUSE} » non pris en charge)")]
+        return [("État", "désactivé")]
+    from .compte import reglages
+
+    verification = (f"toutes les {reglages.VERIFIER_MINUTES:g} min" if reglages.VERIFIER_MINUTES > 0
+                    else "au réveil seulement")
+    return [
+        ("Fournisseur", {"microsoft": "Microsoft 365"}.get(config.JOI_COMPTE, config.JOI_COMPTE)),
+        ("Adresse de Joi", reglages.COURRIEL or "—"),
+        ("Ton adresse", reglages.PROPRIETAIRE or "MANQUANTE"),
+        ("Adresses approuvées", ", ".join(reglages.adresses_approuvees()) or "aucune"),
+        ("Nouveaux courriels", verification),
+        ("Fuseau", reglages.NOM_FUSEAU),
+        ("Application Entra", "présente" if reglages.MS_CLIENT_ID else "MANQUANTE"),
+    ]
 
 
 def _ta_voix() -> str:

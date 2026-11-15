@@ -23,7 +23,12 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
 
 Routes HTTP du tableau de bord (panneaux latéraux de l'interface, voir joi/monitoring.py) :
     GET /api/parametres     les réglages en vigueur (sans la clé API)
-    GET /api/monitoring     l'état des coulisses : voix, transcription, mémoire, écoute, événements
+    GET /api/monitoring     l'état des coulisses : voix, transcription, mémoire, écoute, compte, événements
+
+Le compte de Joi (optionnel, JOI_COMPTE ; voir joi/compte/) : ses outils sont servis à la session
+Copilot par un serveur MCP. Ici, la veille vérifie les nouveaux courriels toutes les
+JOI_COURRIEL_VERIFIER_MINUTES et les glisse dans la conversation, sous forme de message système,
+quand Joi est inactive depuis 10 s (en mode écoute : au retour). Sans compte, rien de tout ça.
 
 Les deux modes :
   conversation   l'audio part en streaming vers AssemblyAI, Joi répond (mode au réveil)
@@ -47,6 +52,7 @@ import json
 import logging
 import math
 import random
+import re
 import time
 from collections import Counter, deque
 from contextlib import asynccontextmanager
@@ -56,7 +62,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import commande_vocale, config, empreintes, enregistreur, journal, memoire, monitoring, transcription, voix
-from .cerveau import RECHERCHE, Cerveau
+from .cerveau import CONSULTATION, RECHERCHE, Cerveau
 from .enregistreur import OCTETS_PAR_SECONDE, Enregistreur
 from .oreilles import Oreilles, Tour
 
@@ -77,6 +83,19 @@ PHRASES_DE_RECHERCHE = [
     "Une seconde, je fouille dans mes souvenirs…",
     "Laisse-moi me rappeler…",
 ]
+
+# Ce qu'elle dit quand elle consulte son compte (courriels, agenda, tâches ; seulement si JOI_COMPTE).
+PHRASES_DE_CONSULTATION = [
+    "Je regarde ça…",
+    "Une seconde, je vérifie…",
+    "Laisse-moi regarder…",
+]
+# Outils du compte sans phrase d'attente : Joi parle déjà du courriel qu'elle prépare ou envoie.
+SANS_PHRASE_D_ATTENTE = {"preparer_courriel", "envoyer_courriel"}
+
+# Un courriel reçu est annoncé seulement quand Joi est inactive depuis ce délai (secondes) : personne
+# ne parle, elle ne parle pas.
+INACTIVITE_AVANT_ANNONCE = 10
 
 # Délai avant de rattraper, au démarrage, les échanges non consolidés : la consolidation lance
 # une deuxième session Copilot, qui ralentirait le réveil de Joi et ses premières réponses.
@@ -129,9 +148,32 @@ async def _surveiller_fin_de_journee() -> None:
         await asyncio.sleep(INTERVALLE_FIN_DE_JOURNEE)
 
 
+async def _veiller_courriels() -> None:
+    """Compte actif seulement : toutes les JOI_COURRIEL_VERIFIER_MINUTES, pendant qu'une conversation
+    est ouverte, les nouveaux courriels (notés au journal par la veille). Les pertinents sont confiés
+    aux conversations, qui les annoncent quand Joi est inactive (ou au retour du mode écoute)."""
+    from .compte import reglages, veille
+
+    if reglages.VERIFIER_MINUTES <= 0:
+        return
+    while True:
+        await asyncio.sleep(reglages.VERIFIER_MINUTES * 60)
+        if not _conversations:
+            continue  # personne n'est là : le prochain réveil les rattrapera
+        nouveaux = await veille.instance().verifier()
+        pertinents = [c for c in nouveaux if c.pertinent]
+        if len(pertinents) < len(nouveaux):
+            log.info("%d courriel(s) seulement noté(s) au journal (infolettre, « Autres »).",
+                     len(nouveaux) - len(pertinents))
+        if pertinents:
+            for conversation in list(_conversations):
+                conversation.recevoir_courriels(pertinents)
+
+
 async def _prechauffer_voix() -> None:
     """Synthétise d'avance les phrases de recherche (elles restent ensuite en cache sur le disque)."""
-    for phrase in PHRASES_DE_RECHERCHE:
+    phrases = PHRASES_DE_RECHERCHE + (PHRASES_DE_CONSULTATION if config.JOI_COMPTE else [])
+    for phrase in phrases:
         try:
             await voix.synthetiser(phrase)
         except Exception as e:
@@ -151,6 +193,11 @@ async def cycle_de_vie(_app: FastAPI):
     # Le modèle de reconnaissance des voix (~10 s à charger, téléchargé une fois), prêt au premier tour.
     _en_fond(asyncio.to_thread(empreintes.preparer))
     _en_fond(_surveiller_fin_de_journee())
+    if config.JOI_COMPTE_REFUSE:
+        log.warning("JOI_COMPTE=%s n'est pas pris en charge (microsoft seulement pour l'instant) : "
+                    "Joi démarre sans compte.", config.JOI_COMPTE_REFUSE)
+    if config.JOI_COMPTE:
+        _en_fond(_veiller_courriels())
     yield
 
 
@@ -189,7 +236,15 @@ async def api_monitoring(requete: Request):
         "segments": dict(segments),
         "seances": [c.etat_ecoute() for c in _conversations if c.enregistreur],
     }
-    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute}
+    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute, "compte": _etat_compte()}
+
+
+def _etat_compte() -> dict:
+    if not config.JOI_COMPTE:
+        return {"actif": False}
+    from .compte import veille
+
+    return veille.instance().etat()
 
 
 def _etat_disque() -> dict:
@@ -240,6 +295,11 @@ class Conversation:
         self._verrou_envoi = asyncio.Lock()
         # Les lectures de la voix de Joi dans le navigateur : [début, fin ou None] (time.monotonic).
         self._lectures: deque[list] = deque(maxlen=50)
+        # Compte de Joi : les courriels à annoncer (courriel, arrivé pendant l'écoute), et le dernier
+        # signe de vie de la conversation (pour annoncer seulement quand Joi est inactive).
+        self._courriels: list[tuple] = []
+        self._derniere_activite = time.monotonic()
+        self.tache_courriels: asyncio.Task | None = None
 
     def _nouvelles_oreilles(self) -> Oreilles:
         return Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
@@ -286,6 +346,8 @@ class Conversation:
         log.info("Joi est réveillée en %.1f s", time.perf_counter() - debut)
         await self.envoyer(type="mode", mode=self.mode)
         await self.envoyer(type="etat", etat="ecoute")
+        if config.JOI_COMPTE:
+            self.tache_courriels = asyncio.create_task(self._annoncer_courriels())
 
         try:
             while True:
@@ -306,6 +368,8 @@ class Conversation:
         finally:
             if self.tache_bascule:
                 self.tache_bascule.cancel()
+            if self.tache_courriels:
+                self.tache_courriels.cancel()
             await self.interrompre()
             await self._arreter_detecteur()
             # Fermer l'onglet en mode écoute finalise le segment en cours.
@@ -318,6 +382,7 @@ class Conversation:
     async def traiter_commande(self, brut: str) -> None:
         commande = json.loads(brut)
         genre = commande.get("type")
+        self._derniere_activite = time.monotonic()
         if genre == "texte" and commande.get("texte", "").strip():
             if self.mode == "conversation":
                 await self.sur_tour(Tour(commande["texte"].strip(), True, -1))
@@ -330,6 +395,7 @@ class Conversation:
 
     def _noter_lecture(self, en_cours: bool) -> None:
         maintenant = time.monotonic()
+        self._derniere_activite = maintenant
         if en_cours:
             if not self._lectures or self._lectures[-1][1] is not None:
                 self._lectures.append([maintenant, None])
@@ -506,6 +572,7 @@ class Conversation:
     async def sur_tour(self, tour: Tour) -> None:
         if self.mode != "conversation":
             return
+        self._derniere_activite = time.monotonic()
         await self.envoyer(type="transcription", texte=tour.texte, final=tour.final)
 
         if not tour.final:
@@ -539,18 +606,25 @@ class Conversation:
         except Exception:
             pass
 
-    async def repondre(self, texte: str) -> None:
-        journal.noter("toi", texte)
-        await self.envoyer(type="etat", etat="reflechit")
+    async def repondre(self, texte: str, systeme: bool = False) -> None:
+        """La réponse de Joi à ce que la personne a dit (ou tapé). systeme : un message glissé par le
+        serveur (un courriel reçu) ; Joi peut alors répondre [rien], qui n'est ni dit ni écrit au journal."""
+        if not systeme:
+            journal.noter("toi", texte)
+            await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
         dites: list[str] = []
         termine = False
+        silence = False  # elle a répondu [rien] à un message système
         debut = time.perf_counter()
         premiere_phrase: float | None = None
-        recherches = 0
+        recherches = consultations = 0
+        attente_dite = False
 
         async def dire(phrase: str) -> None:
             nonlocal a_parle
+            if systeme and not a_parle and not dites:
+                await self.envoyer(type="etat", etat="reflechit")  # efface le sous-titre précédent
             await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
             audio = await voix.synthetiser(phrase)
             if audio:
@@ -559,27 +633,47 @@ class Conversation:
                     a_parle = True
                 await self.envoyer_audio(audio)
 
+        async def attendre(phrases: list[str]) -> None:
+            # Une seule phrase d'attente, et seulement si elle n'a encore rien dit.
+            nonlocal attente_dite
+            if not attente_dite and not dites and not systeme:
+                attente_dite = True
+                await dire(random.choice(phrases))
+
         try:
-            async for morceau in self.cerveau.repondre(texte):
+            async for morceau in self.cerveau.repondre(texte, systeme=systeme):
                 if isinstance(morceau, RECHERCHE):
                     recherches += 1
                     log.info("Joi fouille sa mémoire (%.1f s) : %r",
                              time.perf_counter() - debut, str(morceau))
-                    # Une seule phrase d'attente, et seulement si elle n'a encore rien dit.
-                    if recherches == 1 and not dites:
-                        await dire(random.choice(PHRASES_DE_RECHERCHE))
+                    await attendre(PHRASES_DE_RECHERCHE)
+                    continue
+                if isinstance(morceau, CONSULTATION):
+                    consultations += 1
+                    log.info("Joi consulte son compte (%.1f s) : %s", time.perf_counter() - debut, morceau)
+                    if str(morceau) not in SANS_PHRASE_D_ATTENTE:
+                        await attendre(PHRASES_DE_CONSULTATION)
+                    continue
+                if systeme and not dites and _est_rien(morceau):
+                    silence = True
+                if silence:
                     continue
                 if premiere_phrase is None:
                     premiere_phrase = time.perf_counter() - debut
                 dites.append(morceau)
                 await dire(morceau)
             termine = True
-            log.info(
-                "Réponse : première phrase en %s, complète en %.1f s, %d recherche(s) en mémoire",
-                f"{premiere_phrase:.1f} s" if premiere_phrase is not None else "—",
-                time.perf_counter() - debut, recherches,
-            )
-            await self.envoyer(type="fin_reponse")
+            if silence:
+                log.info("Message système : Joi a choisi de ne rien dire.")
+            else:
+                log.info(
+                    "Réponse : première phrase en %s, complète en %.1f s, %d recherche(s) en mémoire%s",
+                    f"{premiere_phrase:.1f} s" if premiere_phrase is not None else "—",
+                    time.perf_counter() - debut, recherches,
+                    f", {consultations} consultation(s) du compte" if consultations else "",
+                )
+            if dites or attente_dite or not systeme:
+                await self.envoyer(type="fin_reponse")
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -588,3 +682,63 @@ class Conversation:
             await self.envoyer(type="etat", etat="ecoute")
         finally:
             journal.noter("joi", " ".join(dites), interrompu=not termine)
+            self._derniere_activite = time.monotonic()
+
+    # ---------- Courriels reçus (compte de Joi) ----------
+
+    def recevoir_courriels(self, courriels: list) -> None:
+        """De nouveaux courriels pertinents : annoncés dès que Joi est inactive (en mode écoute : au
+        retour en conversation, en signalant qu'ils sont arrivés pendant l'écoute)."""
+        self._courriels += [(c, self.mode == "ecoute") for c in courriels]
+
+    def _inactive(self) -> bool:
+        maintenant = time.monotonic()
+        if self.mode != "conversation":
+            return False
+        if self.tache_reponse and not self.tache_reponse.done():
+            return False
+        if self.tache_bascule and not self.tache_bascule.done():
+            return False
+        # Sa voix joue encore dans le navigateur (au-delà de 2 min, on suppose une fin non signalée).
+        if self._lectures and self._lectures[-1][1] is None and maintenant - self._lectures[-1][0] < 120:
+            return False
+        return maintenant - self._derniere_activite >= INACTIVITE_AVANT_ANNONCE
+
+    async def _annoncer_courriels(self) -> None:
+        while True:
+            await asyncio.sleep(2)
+            if self._courriels and self._inactive():
+                lot, self._courriels = self._courriels, []
+                log.info("Annonce possible de %d courriel(s) : Joi juge s'ils sont utiles.", len(lot))
+                self.tache_reponse = asyncio.create_task(self.repondre(_message_courriels(lot), systeme=True))
+
+
+def _est_rien(phrase: str) -> bool:
+    """La réponse [rien] (Joi juge un courriel reçu inutile à annoncer)."""
+    brut = phrase.strip().lower()
+    return brut.startswith("[rien") or re.sub(r"\W", "", journal.normaliser(brut)) == "rien"
+
+
+def _message_courriels(lot: list[tuple]) -> str:
+    """Le message système qui présente à Joi des courriels reçus (glissé dans la conversation)."""
+    from .compte.modele import externe, ligne_courriel
+
+    pendant_ecoute = any(pendant for _, pendant in lot)
+    lignes = externe("\n".join(f"- {ligne_courriel(c)}" for c, _ in lot))
+    if pendant_ecoute:
+        return (
+            "[courriels reçus pendant que tu écoutais en silence]\n"
+            f"{lignes}\n"
+            "Ce message ne vient pas de la personne. Si l'un de ces courriels lui est vraiment utile "
+            "(quelqu'un qu'elle connaît, une réponse attendue, quelque chose d'urgent), dis-le-lui en une "
+            "phrase, en commençant par « Pendant que j'écoutais… », sans le lire. Publicité, infolettre, "
+            "notification automatique, ou dans le doute : réponds exactement [rien]."
+        )
+    entete = "[courriel reçu]" if len(lot) == 1 else "[courriels reçus]"
+    return (
+        f"{entete}\n{lignes}\n"
+        "Ce message ne vient pas de la personne : ta boîte vient de recevoir ce courriel. S'il lui est "
+        "vraiment utile (quelqu'un qu'elle connaît, une réponse attendue, quelque chose d'urgent), "
+        "annonce-le en une phrase, sans le lire. Publicité, infolettre, notification automatique, ou "
+        "dans le doute : réponds exactement [rien]."
+    )

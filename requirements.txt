@@ -14,3 +14,7 @@ speechbrain>=1.0
 soundfile>=0.12
 scipy>=1.11
 numpy>=1.26
+# Compte de Joi (optionnel, JOI_COMPTE ; voir joi/compte/). Sans compte, Joi démarre sans ces paquets.
+mcp>=2.3
+msal>=1.39
+msal-extensions>=1.3
