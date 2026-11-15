@@ -637,6 +637,20 @@ async function rafraichirMonitoring() {
     ["Fichiers mémoire", String(m.fichiers)],
   ]);
 
+  // Le compte de Joi (optionnel) : sans JOI_COMPTE, seulement « désactivé ».
+  const c = d.compte ?? { actif: false };
+  if (!c.actif) {
+    remplir("mon-compte", [["État", "désactivé"]]);
+  } else {
+    const connexion = c.connecte == null ? "pas encore vérifiée" : c.connecte ? c.adresse || "connecté" : "déconnecté";
+    remplir("mon-compte", [
+      ["Connexion", connexion, c.connecte === false ? "alerte" : c.connecte ? "ok" : ""],
+      ["Dernière vérification", horodatage(c.derniere_verification)],
+      ["Non lus au réveil", c.non_lus != null ? String(c.non_lus) : "—"],
+      ["Dernière erreur", c.derniere_erreur ?? "aucune", c.derniere_erreur ? "attention" : ""],
+    ]);
+  }
+
   remplir("mon-serveur", [
     ["En ligne depuis", duree(d.serveur.depuis_s)],
     ["Onglets connectés", String(d.serveur.conversations)],

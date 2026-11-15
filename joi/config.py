@@ -56,6 +56,16 @@ JOI_VOIX_SILENCE_S = float(os.getenv("JOI_VOIX_SILENCE_S", "0.7"))
 # Heure du bilan des voix de la journée ; les empreintes anonymes du jour sont ensuite effacées.
 JOI_FIN_JOURNEE = os.getenv("JOI_FIN_JOURNEE", "18:00").strip() or "18:00"
 
+# Compte de Joi (courriel, agenda, tâches ; voir joi/compte/). Optionnel : vide, Joi fonctionne comme
+# avant et aucun code du compte n'est importé. C'est le seul interrupteur : les autres réglages du compte
+# (JOI_COURRIEL…) ne sont lus que par joi/compte/reglages.py, quand le compte est actif.
+COMPTES_PRIS_EN_CHARGE = ("microsoft",)  # « icloud » : phase 2, pas encore écrit
+_compte = os.getenv("JOI_COMPTE", "").strip().lower()
+JOI_COMPTE = _compte if _compte in COMPTES_PRIS_EN_CHARGE else None
+# Une valeur inconnue (faute de frappe, ou icloud pas encore pris en charge) : Joi démarre sans compte
+# et l'écrit au journal technique (voir le démarrage de joi/serveur.py).
+JOI_COMPTE_REFUSE = _compte if _compte and not JOI_COMPTE else None
+
 DOSSIER_DONNEES = RACINE / "donnees"
 DOSSIER_VOIX = DOSSIER_DONNEES / "voix"
 DOSSIER_JOURNAL = DOSSIER_DONNEES / "journal"

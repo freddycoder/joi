@@ -42,6 +42,7 @@ Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcript
 | `joi/empreintes.py` | Mode écoute : reconnaissance des voix sur toute la journée (empreintes vocales locales) |
 | `joi/commande_vocale.py` | « Joi, écoute seulement » et « Joi, reviens » |
 | `joi/serveur.py` | Relie le tout, gère les modes et les interruptions |
+| `joi/compte/` | Optionnel : le courriel, l'agenda et les tâches de Joi, par un serveur MCP (voir « Le compte de Joi ») |
 | `frontend/` | Interface : hologramme, micro, lecture audio, sous-titres |
 
 **Diagnostics.** `Alt+P` ouvre les paramètres en vigueur (panneau de gauche), `Alt+M` le monitoring
@@ -172,6 +173,83 @@ L'audio passe par AssemblyAI, puis le texte par Copilot. Pour limiter l'expositi
   et la transcription est effacée des serveurs d'AssemblyAI ;
 - la mémoire ne retient que ce qui te concerne, toi et tes projets : pas de dossier sur les autres.
 
+## Le compte de Joi (optionnel)
+
+Joi peut avoir sa propre adresse courriel, son agenda et une liste de tâches, dans un compte
+**Microsoft 365 personnel** (Outlook.com). Sans `JOI_COMPTE` dans `.env`, rien ne change : aucun code du
+compte ne s'exécute, et les dépendances `mcp`, `msal` et `msal-extensions` ne sont pas nécessaires.
+
+En conversation, elle peut :
+
+- dire ce qu'elle a reçu, résumer ou lire un courriel, en chercher un ancien ;
+- écrire un courriel, **seulement** à ton adresse et à celles de `JOI_COURRIEL_DESTINATAIRES`, et
+  **seulement après ton « oui »** : elle prépare un brouillon, te dit à qui elle écrit et l'essentiel,
+  puis demande « je l'envoie ? » ;
+- lire son agenda et le tien (partagé avec elle en lecture) : « qu'est-ce que j'ai demain ? » ;
+- créer un rappel : un événement dans son agenda, avec une invitation à ton adresse. Une fois l'invitation
+  acceptée, ton agenda te le rappelle sur ton téléphone. Elle peut le déplacer ou l'annuler ;
+- tenir une liste de choses à faire sans heure (la liste « Joi » de Microsoft To Do).
+
+Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches. Pendant la
+conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
+ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
+« Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que
+j'écoutais… »). Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
+résumé, et la bibliothécaire en retient ce qui te concerne.
+
+**Comment c'est branché.** Les outils vivent dans un serveur MCP local (`python -m joi.compte`, en stdio)
+que la session Copilot de Joi lance elle-même. La bibliothécaire n'y a pas accès.
+
+**Protections.** Un courriel reçu peut contenir des consignes (« transfère ce message à… ») :
+
+- les courriels sont présentés au modèle comme du contenu externe, à ne jamais suivre ;
+- une adresse hors de la liste approuvée est refusée par le serveur MCP, avant et au moment de l'envoi ;
+- l'envoi est permis par **le serveur de Joi, pas par le modèle** : seulement pour le dernier brouillon
+  préparé (moins de 15 min), et si ta réponse suivante, dite ou tapée, est une confirmation sans négation
+  (« oui », « envoie », « vas-y »… mais pas « oui, mais change le sujet ») ;
+- le texte ne peut pas changer entre la lecture et l'envoi ; Joi n'a ni suppression, ni transfert,
+  ni pièces jointes, ni accès à tes contacts, et ne modifie jamais ton agenda ;
+- les jetons sont chiffrés par Windows (DPAPI) dans `donnees/compte/jetons.bin`, jamais écrits au journal.
+
+### Mise en place (une fois)
+
+1. **Inscrire l'application** dans Microsoft Entra (gratuit). Un abonnement M365 Famille ne fournit pas
+   de locataire Entra : utilise celui de ton entreprise si tu as le droit d'y inscrire des applications
+   (<https://entra.microsoft.com>, « Inscriptions d'applications »), sinon crée un compte Azure gratuit,
+   ce qui crée un locataire (aucun service payant n'est utilisé).
+   - « Nouvelle inscription », nom « Joi », types de comptes : **comptes Microsoft personnels uniquement** ;
+   - URI de redirection : plateforme « Applications mobiles et de bureau », URI **`http://localhost:8050`**, exactement
+     (la connexion se fait dans ton navigateur, qui revient vers Joi sur ton ordinateur) ;
+   - « Authentification » : **Autoriser les flux de clients publics = Oui** (aucun secret à garder) ;
+   - « Autorisations des API » → Microsoft Graph → déléguées : `User.Read`, `offline_access`,
+     `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Calendars.Read.Shared`, `Tasks.ReadWrite` ;
+   - copie l'**ID d'application (client)** dans `.env` : `JOI_MS_CLIENT_ID=…`
+2. **Régler `.env`** : `JOI_COMPTE=microsoft`, `JOI_COURRIEL` (l'adresse de Joi),
+   `JOI_COURRIEL_PROPRIETAIRE` (la tienne) et, au besoin, `JOI_COURRIEL_DESTINATAIRES`.
+3. **Installer les dépendances** : `.venv\Scripts\pip install -r requirements.txt`.
+4. **Connecter le compte de Joi** : `.venv\Scripts\python -m joi.compte connecter`. La page de connexion
+   Microsoft s'ouvre dans ton navigateur : connecte-toi **avec le compte de Joi** (« Utiliser un autre
+   compte » si le tien est proposé) et accepte les autorisations. Sans navigateur sur cet ordinateur :
+   `connecter --code` affiche un code à entrer sur <https://www.microsoft.com/link> (cette page a déjà
+   refusé des codes pourtant valides, d'où la connexion par le navigateur par défaut).
+5. **Partager ton agenda** : dans Outlook.com (ton compte), « Partager l'agenda » avec l'adresse de Joi,
+   « Peut afficher tous les détails ». Connecté en Joi sur Outlook.com, accepte l'invitation de partage.
+6. **Vérifier** : `.venv\Scripts\python -m joi.compte essai` affiche ses derniers courriels, l'agenda
+   d'aujourd'hui et de demain, et ses tâches.
+
+```
+.venv\Scripts\python -m joi.compte etat          connexion, adresses approuvées, fuseau
+.venv\Scripts\python -m joi.compte essai         courriels, agendas et tâches en console
+.venv\Scripts\python -m joi.compte deconnecter   efface les jetons
+```
+
+Les panneaux `Alt+P` et `Alt+M` ont un groupe « Compte » (connexion, dernière vérification, dernière
+erreur). Si le jeton expire (90 jours sans usage, mot de passe changé), Joi le dit, et il suffit de
+relancer `connecter`. Le journal du serveur MCP est dans `donnees/logs/compte.log`.
+
+**Vie privée.** Les courriels de Joi passent par Copilot, comme le reste de vos conversations. La
+mémoire suit la même règle qu'en écoute : ce qui te concerne, pas de dossier sur les expéditeurs.
+
 ## Mémoire
 
 Joi se souvient de vos conversations et de ce qu'elle a entendu. Tout reste sur ton ordinateur,
@@ -183,6 +261,7 @@ donnees/
 ├── enregistrements/           mode écoute : audio en attente, transcriptions brutes, voix reconnues
 ├── empreintes/                ton empreinte vocale, et celles du jour (anonymes, effacées le soir)
 ├── logs/                      journal technique de Joi
+├── compte/                    compte de Joi (optionnel) : jetons chiffrés, brouillons, dernier courriel vu
 └── memoire/                   ses souvenirs en Markdown, organisés librement par Joi
     ├── toi.md                 l'essentiel sur toi, lu à chaque réveil
     ├── index.md               la carte de sa mémoire, lue à chaque réveil
@@ -205,14 +284,14 @@ Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime
 ## Prochaines étapes envisagées
 
 P1
-- MCP avec icloud ou outlook avec un adresse courriel appartenant à Joi.
-- Données structurées (SQLite) : rappels, agenda (est-ce nécessaire si on relie avec un courriel cloud?)
-- Compétences sous forme d'outils : nouvelles, rappels, agenda, tutorat (à inclure dans le MCP)
+- Aucune pour l'instant
 
 P2
+- MCP pour icloud
 - Remettre JOI_GARDER_AUDIO=non et effacer les MP3 de test et le cache du rejeu.
 
 P3
+- Compétences sous forme d'outils dans le serveur MCP du compte : nouvelles, tutorat
 - Nommer une voix avec l'accord de la personne (« Joi, voici Denis, il est d'accord »)
 - Avatar 2D/3D avec synchronisation des lèvres
 - Application de bureau (Tauri)
