@@ -162,12 +162,15 @@ def pertinence(texte_normalise: str, racines_: list[str]) -> int:
     return sum(r in texte_normalise for r in racines_)
 
 
-def chercher(racines_: list[str], limite: int = 10, jours: int = 60) -> list[dict]:
-    """Les entrées des derniers jours qui contiennent le plus de racines, les plus récentes d'abord."""
+def chercher(racines_: list[str], limite: int = 10, jours: int = 60,
+             dates: set[str] | None = None) -> list[dict]:
+    """Les entrées des derniers jours qui contiennent le plus de racines, les plus récentes d'abord.
+    dates : seulement ces journées (AAAA-MM-JJ), même plus anciennes."""
     if not racines_:
         return []
+    fichiers = [f for f in _fichiers() if f.stem in dates] if dates else _fichiers()[-jours:]
     trouvees = []
-    for fichier in _fichiers()[-jours:]:
+    for fichier in fichiers:
         for entree in _lire(fichier):
             score = pertinence(normaliser(entree.get("texte", "")), racines_)
             if score:

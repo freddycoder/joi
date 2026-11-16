@@ -56,6 +56,7 @@ import re
 import time
 from collections import Counter, deque
 from contextlib import asynccontextmanager
+from datetime import date
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -299,7 +300,10 @@ class Conversation:
         # signe de vie de la conversation (pour annoncer seulement quand Joi est inactive).
         self._courriels: list[tuple] = []
         self._derniere_activite = time.monotonic()
-        self.tache_courriels: asyncio.Task | None = None
+        # Les journées dont une écoute vient d'être apprise : Joi le sait (et peut le dire) dès qu'elle
+        # est inactive et que l'apprentissage est fini.
+        self._journees_apprises: set[str] = set()
+        self.tache_annonces: asyncio.Task | None = None
 
     def _nouvelles_oreilles(self) -> Oreilles:
         return Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
@@ -346,8 +350,8 @@ class Conversation:
         log.info("Joi est réveillée en %.1f s", time.perf_counter() - debut)
         await self.envoyer(type="mode", mode=self.mode)
         await self.envoyer(type="etat", etat="ecoute")
-        if config.JOI_COMPTE:
-            self.tache_courriels = asyncio.create_task(self._annoncer_courriels())
+        memoire.abonner(self.journees_apprises)
+        self.tache_annonces = asyncio.create_task(self._annoncer())
 
         try:
             while True:
@@ -368,8 +372,9 @@ class Conversation:
         finally:
             if self.tache_bascule:
                 self.tache_bascule.cancel()
-            if self.tache_courriels:
-                self.tache_courriels.cancel()
+            memoire.desabonner(self.journees_apprises)
+            if self.tache_annonces:
+                self.tache_annonces.cancel()
             await self.interrompre()
             await self._arreter_detecteur()
             # Fermer l'onglet en mode écoute finalise le segment en cours.
@@ -608,7 +613,7 @@ class Conversation:
 
     async def repondre(self, texte: str, systeme: bool = False) -> None:
         """La réponse de Joi à ce que la personne a dit (ou tapé). systeme : un message glissé par le
-        serveur (un courriel reçu) ; Joi peut alors répondre [rien], qui n'est ni dit ni écrit au journal."""
+        serveur (un courriel reçu, une écoute apprise) ; Joi peut alors répondre [rien], qui n'est ni dit ni écrit au journal."""
         if not systeme:
             journal.noter("toi", texte)
             await self.envoyer(type="etat", etat="reflechit")
@@ -704,17 +709,58 @@ class Conversation:
             return False
         return maintenant - self._derniere_activite >= INACTIVITE_AVANT_ANNONCE
 
-    async def _annoncer_courriels(self) -> None:
+    # ---------- Écoute apprise ----------
+
+    def journees_apprises(self, jours: list[str]) -> None:
+        """Une écoute vient d'entrer dans la mémoire (appelé par memoire.consolider_ecoute)."""
+        self._journees_apprises.update(jours)
+
+    async def _annoncer(self) -> None:
+        """Glisse dans la conversation, quand Joi est inactive, les courriels reçus et les journées
+        apprises. Une journée attend la fin de l'apprentissage en cours : pendant une longue écoute, Joi
+        apprend chaque heure, puis la fin au retour ; elle ne l'annonce qu'une fois, tout appris."""
         while True:
             await asyncio.sleep(2)
-            if self._courriels and self._inactive():
+            if not self._inactive():
+                continue
+            if self._courriels:
                 lot, self._courriels = self._courriels, []
                 log.info("Annonce possible de %d courriel(s) : Joi juge s'ils sont utiles.", len(lot))
                 self.tache_reponse = asyncio.create_task(self.repondre(_message_courriels(lot), systeme=True))
+            elif self._journees_apprises and not _apprentissage_en_cours():
+                jours, self._journees_apprises = sorted(self._journees_apprises), set()
+                log.info("Mémoire : écoute du %s apprise, Joi le sait.", ", ".join(jours))
+                self.tache_reponse = asyncio.create_task(self.repondre(_message_journees(jours), systeme=True))
+
+
+def _apprentissage_en_cours() -> bool:
+    """Une transcription d'écoute ou une consolidation de la mémoire est en cours."""
+    return transcription._verrou.locked() or memoire._verrou_consolidation.locked()
+
+
+def _message_journees(jours: list[str]) -> str:
+    """Le message système qui dit à Joi qu'elle vient d'apprendre une écoute (glissé dans la conversation)."""
+    aujourdhui = date.today().isoformat()
+    lignes = []
+    for jour in jours:
+        quand = f"aujourd'hui ({jour})" if jour == aujourdhui else f"le {jour}"
+        resume = memoire.description(f"journees/{jour}.md")
+        lignes.append(f"- {quand} : journees/{jour}.md" + (f" ({resume})" if resume else ""))
+    return (
+        "[mémoire mise à jour]\n"
+        "Tu viens de finir d'apprendre ce que tu as entendu en écoutant en silence. Le résumé est "
+        "maintenant dans ta mémoire :\n" + "\n".join(lignes) + "\n"
+        "Pour en parler, cherche-le avec se_souvenir en nommant la journée (« aujourd'hui », "
+        "« 16 novembre »). Si tu as dit plus tôt que tu n'avais pas ces notes, ce n'est plus vrai. "
+        "Ce message ne vient pas de la personne. Dis-lui en une phrase courte que tu as fini d'apprendre "
+        "ce que tu as entendu et que tu peux lui en parler, sans le résumer d'office. Si vous êtes au "
+        "milieu d'un autre sujet et que ce serait déplacé, réponds exactement [rien] : tu en parleras "
+        "quand elle le demandera."
+    )
 
 
 def _est_rien(phrase: str) -> bool:
-    """La réponse [rien] (Joi juge un courriel reçu inutile à annoncer)."""
+    """La réponse [rien] (Joi juge un message système inutile à annoncer)."""
     brut = phrase.strip().lower()
     return brut.startswith("[rien") or re.sub(r"\W", "", journal.normaliser(brut)) == "rien"
 
