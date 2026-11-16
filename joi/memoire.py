@@ -1,22 +1,25 @@
 """La mémoire à long terme de Joi : un dossier de fichiers Markdown qu'elle organise librement.
 
 - Au réveil, index.md et toi.md sont ajoutés à son prompt système (aucune latence).
-- Pendant la conversation, l'outil se_souvenir cherche dans la mémoire et le journal.
+- Pendant la conversation, l'outil se_souvenir cherche dans la mémoire et le journal ; une journée
+  nommée (« aujourd'hui », « 16 novembre ») donne son résumé complet.
 - Après une conversation, une passe de consolidation (session Copilot séparée, « la bibliothécaire »)
   relit le journal et réorganise les fichiers. Après une écoute, la même bibliothécaire reçoit la
   transcription de ce qui a été entendu (voir joi/transcription.py et consolider_ecoute). Le soir,
   le bilan des voix entendues s'ajoute au résumé de la journée (noter_voix_du_jour).
+  Une fois une écoute apprise, les conversations ouvertes sont prévenues (abonner).
 - Chaque passe est enregistrée dans un dépôt git local (donnees/memoire/.git, sans remote) :
   on peut voir ou annuler ce qu'elle a changé.
 """
 
 import asyncio
 import logging
+import re
 import shutil
 import subprocess
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -30,7 +33,8 @@ log = logging.getLogger("joi.memoire")
 
 RACINE = config.DOSSIER_MEMOIRE
 TAILLE_MAX_REVEIL = 8000  # caractères de mémoire injectés dans le prompt au réveil
-TAILLE_MAX_SOUVENIR = 3000  # caractères renvoyés par se_souvenir
+TAILLE_MAX_SOUVENIR = 3000  # caractères renvoyés par se_souvenir (fichiers trouvés et journal)
+TAILLE_MAX_JOURNEE = 16000  # en plus : le résumé des journées nommées (« aujourd'hui », « 16 novembre »)
 TAILLE_MAX_TRANCHE = 20000  # caractères de journal envoyés par message à la bibliothécaire
 DELAI_CONSOLIDATION = 600  # secondes accordées à une tranche de consolidation
 
@@ -51,6 +55,27 @@ Je ne sais encore rien de toi.
 """
 
 _verrou_consolidation = asyncio.Lock()
+
+# Prévenus quand une écoute vient d'être apprise, avec les journées touchées (AAAA-MM-JJ) : les
+# conversations ouvertes (joi/serveur.py), pour que Joi sache que le résumé est prêt.
+_abonnes: list[Callable[[list[str]], None]] = []
+
+
+def abonner(rappel: Callable[[list[str]], None]) -> None:
+    _abonnes.append(rappel)
+
+
+def desabonner(rappel: Callable[[list[str]], None]) -> None:
+    if rappel in _abonnes:
+        _abonnes.remove(rappel)
+
+
+def _signaler_apprises(jours: list[str]) -> None:
+    for rappel in list(_abonnes):
+        try:
+            rappel(jours)
+        except Exception:
+            log.exception("Signalement d'une journée apprise impossible")
 
 
 # --- Fichiers ---------------------------------------------------------------------------------
@@ -143,40 +168,159 @@ def contexte_reveil() -> str:
 # --- Outil de la conversation -----------------------------------------------------------------
 
 class ParametresSouvenir(BaseModel):
-    recherche: str = Field(description="Mots-clés à retrouver, ex. « chat Pixel » ou « voyage Gaspésie ».")
+    recherche: str = Field(description=(
+        "Mots-clés à retrouver, ex. « chat Pixel » ou « voyage Gaspésie ». Pour une journée, nomme-la : "
+        "« aujourd'hui », « hier », « 16 novembre » ou « 2026-11-16 » donnent son résumé complet."
+    ))
 
 
-def souvenir(recherche: str) -> str:
-    """Cherche dans les fichiers de mémoire, puis dans le journal des conversations."""
-    mots = journal.racines(recherche)
+MOIS = {
+    "janvier": 1, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6, "juillet": 7,
+    "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11, "decembre": 12,
+}
+# Sur une recherche normalisée (minuscules, sans accents) : voir journal.normaliser.
+_DATE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_DATE_TEXTE = re.compile(r"\b(\d{1,2})(?:er)?\s+(" + "|".join(MOIS) + r")(?:\s+(\d{4}))?\b")
+_DATES_RELATIVES = [  # dans cet ordre : « avant-hier » avant « hier »
+    (re.compile(r"\bavant[\s-]*hier\b"), 2),
+    (re.compile(r"\bhier\b"), 1),
+    (re.compile(r"\baujourd\W*hui\b|\bce matin\b|\bcet apres[\s-]*midi\b|\bce soir\b"), 0),
+]
+_MOT_JOURNEE = re.compile(r"\bjournees?\b")
+
+
+def _dates_nommees(recherche: str, aujourdhui: date) -> tuple[list[str], str]:
+    """Les journées nommées dans une recherche (« aujourd'hui », « hier », « 16 novembre »,
+    « 2026-11-16 »), en AAAA-MM-JJ, et le reste de la recherche sans elles. Un jour sans année est
+    celui de l'année en cours, ou de l'an passé s'il n'est pas encore arrivé."""
+    texte = journal.normaliser(recherche)
+    jours: list[str] = []
+
+    def ajouter(annee: int, mois: int, jour: int) -> None:
+        try:
+            iso = date(annee, mois, jour).isoformat()
+        except ValueError:
+            return
+        if iso not in jours:
+            jours.append(iso)
+
+    def iso(m: re.Match) -> str:
+        ajouter(int(m[1]), int(m[2]), int(m[3]))
+        return " "
+
+    def en_toutes_lettres(m: re.Match) -> str:
+        mois, jour = MOIS[m[2]], int(m[1])
+        annee = int(m[3]) if m[3] else aujourdhui.year
+        if not m[3]:
+            try:
+                if date(annee, mois, jour) > aujourdhui:
+                    annee -= 1
+            except ValueError:
+                return m[0]
+        ajouter(annee, mois, jour)
+        return " "
+
+    texte = _DATE_ISO.sub(iso, texte)
+    texte = _DATE_TEXTE.sub(en_toutes_lettres, texte)
+    for motif, decalage in _DATES_RELATIVES:
+        if motif.search(texte):
+            texte = motif.sub(" ", texte)
+            jour = aujourdhui - timedelta(days=decalage)
+            ajouter(jour.year, jour.month, jour.day)
+    if jours:
+        texte = _MOT_JOURNEE.sub(" ", texte)  # « la journée du 16 » : le mot n'apprend plus rien
+    return jours, texte
+
+
+def _couper(texte: str, taille: int) -> str:
+    """Coupe un texte à une fin de ligne, sous la taille donnée."""
+    if len(texte) <= taille:
+        return texte
+    coupe = texte.rfind("\n", 0, taille)
+    return texte[: coupe if coupe > taille // 2 else taille].rstrip() + "\n[…]"
+
+
+def _extrait(lignes: list[str], normalisees: list[str], poids: dict[str, float], taille: int) -> str:
+    """Les lignes d'un fichier qui contiennent les mots les plus rares, avec leurs voisines, dans
+    l'ordre du fichier et sous la taille donnée : une ligne qui ne contient qu'un mot répandu
+    (« novembre ») ne prend pas la place d'une ligne qui contient le mot cherché."""
+    scores = [(sum(p for m, p in poids.items() if m in l), i) for i, l in enumerate(normalisees)]
+    retenues: set[int] = set()
+    longueur = 0
+    for score, i in sorted(scores, key=lambda s: (-s[0], s[1])):
+        if score <= 0:
+            break
+        voisines = {j for j in range(max(0, i - 1), min(len(lignes), i + 2)) if lignes[j].strip()}
+        ajout = sum(len(lignes[j]) + 1 for j in voisines - retenues)
+        if retenues and longueur + ajout > taille:
+            continue
+        retenues |= voisines
+        longueur += ajout
+    return _couper("\n".join(lignes[j] for j in sorted(retenues)), taille)
+
+
+def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
+    """Cherche dans les fichiers de mémoire, puis dans le journal des conversations.
+
+    Une journée nommée (« aujourd'hui », « hier », « 16 novembre ») donne d'abord son résumé complet
+    (journees/AAAA-MM-JJ.md) : une recherche par mots-clés ne le retrouve pas, car « novembre » ou
+    « 2026 » se trouvent dans tous les résumés. Le reste de la recherche sert de mots-clés."""
+    jours, reste = _dates_nommees(recherche, aujourdhui or date.today())
     resultats = []
 
-    # 1. Mémoire : les fichiers qui contiennent le plus de mots, avec les lignes concernées.
-    classement = []
+    # 1. Les journées nommées : leur résumé, en entier (ou presque).
+    deja_montres: set[Path] = set()
+    for jour in jours:
+        fichier = _chemin_md(f"journees/{jour}.md")
+        if fichier.exists():
+            deja_montres.add(fichier.resolve())
+            contenu = fichier.read_text(encoding="utf-8").strip()
+            resultats.append(f"[mémoire : journees/{jour}.md, le résumé de cette journée]\n"
+                             f"{_couper(contenu, TAILLE_MAX_JOURNEE // len(jours))}")
+        else:
+            resultats.append(f"[mémoire : pas de résumé de la journée du {jour} (rien d'appris ce jour-là, "
+                             "ou une écoute pas encore transcrite et apprise)]")
+
+    if jours:  # sans la date, ne garder que les vrais mots-clés (pas de repli sur « du », « la »)
+        mots = [m for m in journal.racines(reste) if len(m) >= 3 and m not in journal.MOTS_VIDES]
+    else:
+        mots = journal.racines(reste)
+
+    # 2. Mémoire : les fichiers qui contiennent les mots les plus rares, avec les lignes concernées.
+    fichiers = []
     for fichier in _fichiers_md():
+        if fichier.resolve() in deja_montres:
+            continue
         lignes = fichier.read_text(encoding="utf-8").splitlines()
         normalisees = [journal.normaliser(l) for l in lignes]
-        score = journal.pertinence("\n".join(normalisees), mots)
+        fichiers.append((fichier, lignes, normalisees, "\n".join(normalisees)))
+    # Un mot présent dans un seul fichier compte pour 1, dans quatre fichiers pour 1/4.
+    presences = {m: sum(m in texte for *_, texte in fichiers) for m in mots}
+    poids = {m: 1 / n for m, n in presences.items() if n}
+    classement = []
+    for fichier, lignes, normalisees, texte in fichiers:
+        score = sum(p for m, p in poids.items() if m in texte)
         if score:
-            classement.append((score, fichier, lignes, normalisees))
-    classement.sort(key=lambda x: -x[0])
-    for _, fichier, lignes, normalisees in classement[:5]:
-        retenues = sorted({
-            j
-            for i, l in enumerate(normalisees) if any(m in l for m in mots)
-            for j in range(max(0, i - 1), min(len(lignes), i + 2))
-        })
-        extrait = "\n".join(lignes[j] for j in retenues if lignes[j].strip())
-        resultats.append(f"[mémoire : {_relatif(fichier)}]\n{extrait}")
+            classement.append((score, fichier.stat().st_mtime, fichier, lignes, normalisees))
+    classement.sort(key=lambda x: (-x[0], -x[1]))  # à égalité, le plus récent d'abord
+    retenus = classement[:5]
 
-    # 2. Journal : les échanges récents mot pour mot (et ce qui a été entendu en mode écoute).
-    for entree in journal.chercher(mots, limite=8):
-        resultats.append(f"[journal {_quand(entree)}] {_qui(entree)} : {entree['texte']}")
+    # 3. Journal : les échanges mot pour mot (et ce qui a été entendu en mode écoute), seulement
+    # des journées nommées s'il y en a.
+    entrees = journal.chercher(mots, limite=8, dates=set(jours) or None) if mots else []
+
+    # Les fichiers et le journal se partagent l'extrait : un seul fichier ne le remplit plus.
+    sections = len(retenus) + (1 if entrees else 0)
+    part = TAILLE_MAX_SOUVENIR // sections if sections else 0
+    for _, _, fichier, lignes, normalisees in retenus:
+        resultats.append(f"[mémoire : {_relatif(fichier)}]\n{_extrait(lignes, normalisees, poids, part)}")
+    if entrees:
+        lignes_journal = [f"[journal {_quand(e)}] {_qui(e)} : {e['texte']}" for e in entrees]
+        resultats.append(_couper("\n".join(lignes_journal), part))
 
     if not resultats:
         return "Aucun souvenir trouvé pour cette recherche."
-    texte = "\n\n".join(resultats)
-    return texte[:TAILLE_MAX_SOUVENIR] + ("\n[…]" if len(texte) > TAILLE_MAX_SOUVENIR else "")
+    return "\n\n".join(resultats)
 
 
 def _quand(entree: dict) -> str:
@@ -496,6 +640,7 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
         phrases = sum(len(s.entrees) for e in ecoutes for s in e.segments)
         log.info("Consolidation de %d séance(s) d'écoute (%d phrases) dans la mémoire…",
                  len(ecoutes), phrases)
+        apprises: list[str] = []  # les journées dont au moins une partie est entrée dans la mémoire
         try:
             async with _bibliothecaire() as session:
                 for ecoute in ecoutes:
@@ -541,9 +686,25 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                         await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
                         for rappel in rappels:
                             rappel()
+                        if jour not in apprises:
+                            apprises.append(jour)
             log.info("Écoute consolidée dans la mémoire.")
         except Exception:
             log.exception("Consolidation de l'écoute interrompue")
         finally:
             debuts = ", ".join(e.debut[:16].replace("T", " ") for e in ecoutes)
             await asyncio.to_thread(_enregistrer_version, f"Écoute du {debuts}")
+    if apprises:
+        _signaler_apprises(apprises)
+
+
+def description(chemin: str) -> str:
+    """La ligne « description: » d'un fichier de la mémoire (vide s'il n'en a pas)."""
+    try:
+        contenu = _chemin_md(chemin).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+    for ligne in contenu.splitlines()[:6]:
+        if ligne.startswith("description:"):
+            return ligne.removeprefix("description:").strip()
+    return ""

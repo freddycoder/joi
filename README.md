@@ -103,6 +103,9 @@ Pendant une longue écoute, Joi n'attend pas la fin : après chaque heure d'audi
 arrondi aux segments terminés), elle transcrit et apprend la dernière heure pendant que l'enregistrement
 continue. Au retour, il ne reste que la fin à traiter. `JOI_APPRENDRE_MINUTES=0` revient à tout faire à la fin.
 Si Joi est arrêtée en cours de route, la suite est reprise au prochain démarrage.
+Quand tout est appris, Joi te dit d'elle-même qu'elle peut te parler de ta journée. Demande-lui alors
+« qu'as-tu entendu aujourd'hui ? » : une journée nommée (« aujourd'hui », « hier », « 16 novembre »)
+lui donne le résumé complet de cette journée.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
 Garde l'onglet ouvert et branche le portable.
