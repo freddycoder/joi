@@ -10,6 +10,7 @@ const LIBELLES = {
   ecoute: "écoute",
   reflechit: "réfléchit",
   parle: "parle",
+  reconnexion: "reconnexion…",
 };
 const LIBELLE_MODE_ECOUTE = "écoute seule";
 
@@ -20,6 +21,7 @@ const APPARENCES = {
   ecoute: { couleur: [95, 216, 255], vitesse: 0.22, lumiere: 0.85, agitation: 0.04 },
   reflechit: { couleur: [155, 123, 255], vitesse: 1.1, lumiere: 0.9, agitation: 0.3 },
   parle: { couleur: [255, 111, 200], vitesse: 0.35, lumiere: 1.0, agitation: 0.08 },
+  reconnexion: { couleur: [255, 90, 90], vitesse: 0.08, lumiere: 0.3, agitation: 0.0 },
 };
 // En mode écoute, l'hologramme est atténué, quel que soit l'état.
 const APPARENCE_MODE_ECOUTE = { couleur: [95, 216, 255], vitesse: 0.06, lumiere: 0.22, agitation: 0.0 };
@@ -27,6 +29,14 @@ const APPARENCE_MODE_ECOUTE = { couleur: [95, 216, 255], vitesse: 0.06, lumiere:
 let etat = "veille";
 let mode = "conversation"; // conversation | ecoute (confirmé par le serveur)
 let ws = null;
+
+// Reconnexion automatique : si le WebSocket se ferme alors que Joi était réveillée (serveur relancé,
+// mise en veille du portable), on se reconnecte sans nouveau clic : le micro et l'AudioContext sont
+// déjà ouverts. Délais entre deux essais, en secondes (le dernier se répète).
+const DELAIS_RECONNEXION = [1, 2, 5, 10, 30];
+let modeVoulu = "conversation"; // le mode à retrouver après une coupure (en écoute : une nouvelle séance)
+let eveillee = false; // ce WebSocket a reçu son premier « mode » : Joi est réveillée
+let reprise = null; // { essais, minuterie } pendant une coupure
 let reponseFinie = true;
 let texteJoi = "";
 
@@ -43,12 +53,12 @@ function afficherEtat() {
   el.dataset.etat = etat;
 }
 
-function afficherErreur(message) {
+function afficherErreur(message, persistante = false) {
   const el = $("erreur");
   el.textContent = message;
   el.hidden = false;
   clearTimeout(afficherErreur.minuterie);
-  afficherErreur.minuterie = setTimeout(() => (el.hidden = true), 10000);
+  if (!persistante) afficherErreur.minuterie = setTimeout(() => (el.hidden = true), 10000);
 }
 
 function afficherJoi(phrase) {
@@ -139,6 +149,12 @@ function contraintesMicro(annulerEcho) {
 async function demarrerMicro() {
   const flux = await navigator.mediaDevices.getUserMedia({ audio: contraintesMicro(true) });
   pisteMicro = flux.getAudioTracks()[0];
+  // Micro débranché, ou permission retirée : plus rien n'arrive au serveur, sans autre signe.
+  pisteMicro.onended = () => {
+    afficherErreur("Le micro s'est arrêté (débranché, ou permission retirée) : Joi ne t'entend plus. " +
+      "Rebranche-le, puis recharge la page.", true);
+    if (mode === "ecoute") marquerEnregistrementInterrompu();
+  };
   // Contexte à 16 kHz : le navigateur rééchantillonne le micro au format attendu par AssemblyAI.
   const ctxMicro = new AudioContext({ sampleRate: 16000 });
   await ctxMicro.audioWorklet.addModule("/static/micro-worklet.js");
@@ -202,6 +218,23 @@ function afficherDureeEnregistrement() {
     `${deux(Math.floor(s / 3600))}:${deux(Math.floor(s / 60) % 60)}:${deux(s % 60)}`;
 }
 
+// Pendant une coupure en écoute, l'enregistrement est arrêté : ça doit se voir de loin.
+function marquerEnregistrementInterrompu() {
+  clearInterval(minuterieEnregistrement);
+  $("enregistrement").classList.add("interrompu");
+  $("enregistrement").title = "L'enregistrement est interrompu";
+  $("duree-enregistrement").textContent = "interrompu";
+}
+
+function relancerCompteurEnregistrement() {
+  $("enregistrement").classList.remove("interrompu");
+  $("enregistrement").title = "Joi enregistre ce qu'elle entend";
+  clearInterval(minuterieEnregistrement);
+  debutEnregistrement = Date.now();
+  afficherDureeEnregistrement();
+  minuterieEnregistrement = setInterval(afficherDureeEnregistrement, 1000);
+}
+
 function appliquerMode(nouveau) {
   const avant = mode;
   mode = nouveau;
@@ -219,14 +252,13 @@ function appliquerMode(nouveau) {
   if (mode === "ecoute") {
     $("ligne-humain").textContent = "";
     $("ligne-joi").textContent = "";
-    debutEnregistrement = Date.now();
-    afficherDureeEnregistrement();
-    minuterieEnregistrement = setInterval(afficherDureeEnregistrement, 1000);
+    relancerCompteurEnregistrement();
     $("enregistrement").hidden = false;
     garderEcranAllume();
     reglerMicro(false);
   } else {
     clearInterval(minuterieEnregistrement);
+    $("enregistrement").classList.remove("interrompu");
     $("enregistrement").hidden = true;
     relacherEcran();
     reglerMicro(true);
@@ -242,6 +274,7 @@ $("mode").addEventListener("click", () => {
 // ---------- Connexion au serveur ----------
 
 function connecter() {
+  eveillee = false;
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
 
@@ -281,10 +314,15 @@ function connecter() {
         couperAudio();
         if (etat === "parle") changerEtat("ecoute");
         break;
-      case "mode":
+      case "mode": {
+        const reveil = !eveillee;
+        eveillee = true;
+        if (reveil && reprise && reprendreApresCoupure(msg.mode)) break;
+        modeVoulu = msg.mode;
         appliquerMode(msg.mode);
         $("mode").hidden = false;
         break;
+      }
       case "erreur":
         afficherErreur(msg.message);
         break;
@@ -293,13 +331,52 @@ function connecter() {
 
   ws.onclose = () => {
     mesures.connexion = null;
+    couperAudio();
+    // Joi était réveillée (ou on essaie déjà de la retrouver) : on se reconnecte. Sinon, le réveil
+    // lui-même a échoué (clé manquante…) : retour en veille, le serveur a expliqué pourquoi.
+    if (eveillee || reprise) {
+      attendreReconnexion();
+      return;
+    }
     appliquerMode("conversation");
     changerEtat("veille");
-    couperAudio();
     $("reveiller").hidden = false;
     $("clavier").hidden = true;
     $("mode").hidden = true;
   };
+}
+
+function attendreReconnexion() {
+  if (!reprise) {
+    reprise = { essais: 0, minuterie: null };
+    afficherErreur("La liaison avec Joi est coupée : reconnexion…");
+  }
+  eveillee = false;
+  const delai = DELAIS_RECONNEXION[Math.min(reprise.essais, DELAIS_RECONNEXION.length - 1)];
+  reprise.essais++;
+  changerEtat("reconnexion");
+  $("clavier").hidden = true;
+  $("mode").disabled = true;
+  // Le mode affiché ne change pas : en écoute, le Wake Lock reste pris et l'indicateur clignote.
+  if (mode === "ecoute") marquerEnregistrementInterrompu();
+  clearTimeout(reprise.minuterie);
+  reprise.minuterie = setTimeout(connecter, delai * 1000);
+}
+
+// Joi est de nouveau réveillée. Renvoie true si on redemande le mode écoute (le serveur repart
+// toujours en conversation) : on ne réaffiche pas « conversation » entre les deux. Une nouvelle
+// séance d'écoute commence ; l'ancienne a été finalisée par le serveur, qui la transcrit.
+function reprendreApresCoupure(modeServeur) {
+  console.info(`Joi est de nouveau joignable (${reprise.essais} essai(s)).`);
+  reprise = null;
+  afficherErreur("Liaison rétablie.");
+  if (modeVoulu === "ecoute" && modeServeur !== "ecoute") {
+    ws.send(JSON.stringify({ type: "mode", mode: "ecoute" }));
+    relancerCompteurEnregistrement();
+    return true;
+  }
+  if (mode === "ecoute" && modeServeur === "ecoute") relancerCompteurEnregistrement();
+  return false;
 }
 
 $("reveiller").addEventListener("click", async () => {
@@ -587,6 +664,20 @@ async function rafraichirMonitoring() {
     remplir("mon-serveur", [["Serveur", `injoignable (${e.message})`, "alerte"]]);
     return;
   }
+
+  // Où part le temps, de la fin de ta phrase au premier son : dernière réponse · médiane.
+  const lat = d.latence ?? { derniere: null, mediane: {}, reponses: 0 };
+  const sec = (v) => (v == null ? "—" : `${v.toFixed(1)} s`);
+  const etape = (cle) => `${sec(lat.derniere?.[cle])} · ${sec(lat.mediane[cle])}`;
+  remplir("mon-latence", [
+    ["Dernière · médiane", `${lat.reponses} réponse(s) sans recherche`],
+    ["Fin de tour", etape("fin_de_tour")],
+    ["Cerveau, 1er mot", etape("premier_mot")],
+    ["Cerveau, 1re phrase", etape("premiere_phrase")],
+    ["Synthèse", etape("synthese") + (lat.derniere?.cache ? " (cache)" : "")],
+    ["Début de lecture", etape("lecture")],
+    ["Total", etape("total"), lat.mediane.total > 3 ? "attention" : ""],
+  ]);
 
   const v = d.voix;
   remplir("mon-voix", [

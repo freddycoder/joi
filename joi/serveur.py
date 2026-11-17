@@ -19,7 +19,17 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
     {"type": "stop_audio"}                   couper l'audio en cours (interruption)
     {"type": "mode", "mode": "..."}          le mode en vigueur (envoyé au réveil et à chaque changement,
                                              même si le mode demandé était déjà actif)
-    {"type": "erreur", "message": "..."}
+    {"type": "erreur", "message": "..."}     un problème, ou la fin d'un problème (« Je t'entends de nouveau »)
+
+Les coupures :
+  - le navigateur perd le WebSocket alors que Joi était réveillée (serveur relancé, mise en veille) :
+    il se reconnecte seul, avec un délai croissant (1, 2, 5, 10, puis 30 s), et redemande le mode
+    écoute s'il y était. Le serveur repart toujours en conversation : une nouvelle séance d'écoute
+    commence, l'ancienne a été finalisée à la fermeture du WebSocket (puis transcrite) ;
+  - AssemblyAI ferme la session (3 h au plus, erreur, réseau) : en conversation, de nouvelles oreilles
+    avec un délai croissant (_reconnecter_oreilles), annoncé par un message « erreur » ;
+  - en écoute, plus aucun audio pendant SILENCE_MAX_ECOUTE secondes alors que le WebSocket est
+    ouvert (micro coupé, onglet gelé) : message « erreur » et avertissement au journal technique.
 
 Routes HTTP du tableau de bord (panneaux latéraux de l'interface, voir joi/monitoring.py) :
     GET /api/parametres     les réglages en vigueur (sans la clé API)
@@ -57,13 +67,14 @@ import time
 from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import date
+from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import commande_vocale, config, empreintes, enregistreur, journal, memoire, monitoring, transcription, voix
-from .cerveau import CONSULTATION, RECHERCHE, Cerveau
+from .cerveau import CONSULTATION, RECHERCHE, Cerveau, arreter_client_partage, client_partage
 from .enregistreur import OCTETS_PAR_SECONDE, Enregistreur
 from .oreilles import Oreilles, Tour
 
@@ -105,8 +116,20 @@ DELAI_RATTRAPAGE = 300  # secondes
 # Vérification de la fin de journée (bilan des voix), en secondes.
 INTERVALLE_FIN_DE_JOURNEE = 15 * 60
 
+# Phrases d'une réponse synthétisées en même temps au plus (voir Conversation.repondre).
+SYNTHESES_EN_AVANCE = 3
+
 # Marge autour d'une lecture de la voix de Joi (latence du haut-parleur et du micro), en secondes.
 MARGE_LECTURE = 0.5
+
+# Reconnexion des oreilles après une coupure d'AssemblyAI : secondes avant chaque essai (le dernier
+# délai se répète). Une nouvelle session recommence la numérotation des tours : nouvelles oreilles.
+DELAIS_RECONNEXION = (1, 2, 5, 10, 30)
+
+# En écoute, le WebSocket peut rester ouvert alors que plus aucun audio n'arrive (micro débranché,
+# onglet gelé) : au-delà de ce silence total, en secondes, on le dit au navigateur et au journal.
+SILENCE_MAX_ECOUTE = 30
+INTERVALLE_GARDE_SILENCE = 5
 
 # Tâches de fond (consolidation de la mémoire) : on garde une référence pour qu'elles aillent au bout.
 _taches_de_fond: set[asyncio.Task] = set()
@@ -182,10 +205,19 @@ async def _prechauffer_voix() -> None:
             return
 
 
+async def _prechauffer_cerveau() -> None:
+    """Démarre le client Copilot partagé avant le premier réveil : il ne reste qu'une session à créer."""
+    try:
+        await client_partage()
+    except Exception as e:
+        log.warning("Client Copilot pas encore démarré (il le sera au réveil) : %s", e)
+
+
 @asynccontextmanager
 async def cycle_de_vie(_app: FastAPI):
     monitoring.installer()
     memoire.initialiser()
+    _en_fond(_prechauffer_cerveau())
     _en_fond(_rattraper_plus_tard())
     _en_fond(_prechauffer_voix())
     # Télécharge le modèle de « Joi, reviens » dès maintenant (une seule fois), pour qu'il soit prêt
@@ -200,6 +232,7 @@ async def cycle_de_vie(_app: FastAPI):
     if config.JOI_COMPTE:
         _en_fond(_veiller_courriels())
     yield
+    await arreter_client_partage()
 
 
 app = FastAPI(title="Joi", lifespan=cycle_de_vie)
@@ -237,7 +270,8 @@ async def api_monitoring(requete: Request):
         "segments": dict(segments),
         "seances": [c.etat_ecoute() for c in _conversations if c.enregistreur],
     }
-    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute, "compte": _etat_compte()}
+    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute, "compte": _etat_compte(),
+            "latence": monitoring.resume_latences()}
 
 
 def _etat_compte() -> dict:
@@ -268,6 +302,93 @@ def _etat_disque() -> dict:
     }
 
 
+class MesureReponse:
+    """Où part le temps d'une réponse, de la fin de ta phrase au premier son (instants time.monotonic) :
+
+      fin de parole → tour final   AssemblyAI décide que tu as fini (l'audio du dernier mot est arrivé
+                                   à fin_parole, voir Oreilles._traiter_tour)
+      envoi → 1er mot → 1re phrase le cerveau (Copilot)
+      synthèse                     la voix de la première phrase (en distinguant le cache)
+      MP3 envoyé → lecture         le navigateur décode et commence à jouer (message « lecture »)
+
+    Le premier son peut être une phrase d'attente (« Laisse-moi me rappeler… ») quand Joi fouille sa
+    mémoire : c'est bien ce que la personne entend en premier."""
+
+    def __init__(self, tour: Tour | None):
+        self.fin_parole = tour.fin_parole if tour else None
+        self.tour_final = tour.recu if tour else None
+        self.envoi: float | None = None
+        self.premier_token: float | None = None
+        self.premiere_phrase: float | None = None
+        self.synthese: dict | None = None  # {"cache", "duree_s"} de la première phrase dite
+        self.mp3_envoye: float | None = None
+        self.lecture: float | None = None
+        self.recherches = 0
+        self.reponse_finie = False
+
+    @staticmethod
+    def _ecart(a: float | None, b: float | None) -> float | None:
+        return round(b - a, 2) if a is not None and b is not None else None
+
+    def resume(self) -> dict:
+        debut = self.fin_parole or self.tour_final or self.envoi
+        return {
+            "fin_de_tour": self._ecart(self.fin_parole, self.tour_final),
+            "premier_mot": self._ecart(self.envoi, self.premier_token),
+            "premiere_phrase": self._ecart(self.envoi, self.premiere_phrase),
+            "synthese": round(self.synthese["duree_s"], 2) if self.synthese else None,
+            "cache": self.synthese.get("cache") if self.synthese else None,
+            "lecture": self._ecart(self.mp3_envoye, self.lecture),
+            "total": self._ecart(debut, self.lecture or self.mp3_envoye),
+            "recherches": self.recherches,
+        }
+
+    def ligne(self) -> str:
+        r = self.resume()
+
+        def s(cle: str) -> str:
+            return f"{r[cle]:.1f} s" if r[cle] is not None else "—"
+
+        cache = " (cache)" if r["cache"] else ""
+        debut = "fin de parole" if self.fin_parole else "tour final" if self.tour_final else "envoi"
+        return (f"Latence : fin de tour {s('fin_de_tour')} · cerveau : 1er mot {s('premier_mot')}, "
+                f"1re phrase {s('premiere_phrase')} · synthèse {s('synthese')}{cache} · "
+                f"lecture {s('lecture')} · total {s('total')} ({debut} → premier son)"
+                + (f" · {r['recherches']} recherche(s)" if r["recherches"] else ""))
+
+
+class GardeFouSilence:
+    """Retient l'instant du dernier paquet audio reçu. verifier() le signale une fois quand le
+    silence total dépasse le seuil ; audio_recu() dit, une fois, combien de temps il a duré quand
+    l'audio revient. L'horloge est injectable pour les tests."""
+
+    def __init__(self, seuil_s: float = SILENCE_MAX_ECOUTE, horloge: Callable[[], float] = time.monotonic):
+        self.seuil_s = seuil_s
+        self._horloge = horloge
+        self.dernier_audio = horloge()
+        self.en_alerte = False
+
+    def reprendre(self) -> None:
+        """Une nouvelle écoute commence : le compte repart de zéro."""
+        self.dernier_audio = self._horloge()
+        self.en_alerte = False
+
+    def audio_recu(self) -> float | None:
+        maintenant = self._horloge()
+        absence, self.dernier_audio = maintenant - self.dernier_audio, maintenant
+        if self.en_alerte:
+            self.en_alerte = False
+            return absence
+        return None
+
+    def verifier(self) -> float | None:
+        absence = self._horloge() - self.dernier_audio
+        if not self.en_alerte and absence > self.seuil_s:
+            self.en_alerte = True
+            return absence
+        return None
+
+
 @app.websocket("/ws")
 async def websocket_joi(ws: WebSocket):
     # Seule la page de Joi peut se connecter : sans ce contrôle, n'importe quel site ouvert
@@ -282,7 +403,7 @@ async def websocket_joi(ws: WebSocket):
 class Conversation:
     """Une conversation entre une personne (un onglet du navigateur) et Joi."""
 
-    def __init__(self, ws: WebSocket):
+    def __init__(self, ws: WebSocket, horloge: Callable[[], float] = time.monotonic):
         self.ws = ws
         self.cerveau = Cerveau()
         self.oreilles = self._nouvelles_oreilles()
@@ -291,7 +412,15 @@ class Conversation:
         self._audio_non_appris = 0.0  # secondes d'écoute terminées, pas encore confiées à transcription
         self.detecteur_retour: commande_vocale.DetecteurRetour | None = None
         self.tache_reponse: asyncio.Task | None = None
+        # L'interruption de la réponse précédente (abort du cerveau, jusqu'à 5 s) : hors de la
+        # réception d'AssemblyAI, et attendue avant la réponse suivante.
+        self._tache_interruption: asyncio.Task | None = None
         self.tache_bascule: asyncio.Task | None = None
+        self.tache_reconnexion: asyncio.Task | None = None
+        self.garde_silence = GardeFouSilence(horloge=horloge)
+        self.tache_garde: asyncio.Task | None = None
+        # La mesure de la dernière réponse, complétée quand le navigateur commence à la jouer.
+        self._mesure: MesureReponse | None = None
         self._verrou_mode = asyncio.Lock()
         self._verrou_envoi = asyncio.Lock()
         # Les lectures de la voix de Joi dans le navigateur : [début, fin ou None] (time.monotonic).
@@ -306,7 +435,13 @@ class Conversation:
         self.tache_annonces: asyncio.Task | None = None
 
     def _nouvelles_oreilles(self) -> Oreilles:
-        return Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
+        oreilles = Oreilles(sur_tour=self.sur_tour, sur_erreur=self.signaler_erreur)
+
+        async def coupure(code: int | None, raison: str) -> None:
+            self._oreilles_coupees(oreilles, code, raison)
+
+        oreilles.sur_coupure = coupure
+        return oreilles
 
     async def envoyer(self, **message) -> None:
         async with self._verrou_envoi:
@@ -352,6 +487,7 @@ class Conversation:
         await self.envoyer(type="etat", etat="ecoute")
         memoire.abonner(self.journees_apprises)
         self.tache_annonces = asyncio.create_task(self._annoncer())
+        self.tache_garde = asyncio.create_task(self._surveiller_audio())
 
         try:
             while True:
@@ -359,6 +495,9 @@ class Conversation:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes"):
+                    absence = self.garde_silence.audio_recu()
+                    if absence is not None and self.mode == "ecoute":
+                        log.info("Écoute : l'audio est revenu après %.0f s de silence total.", absence)
                     if self.enregistreur:
                         self.enregistreur.ecrire(message["bytes"])
                         if self.detecteur_retour:
@@ -370,11 +509,10 @@ class Conversation:
         except WebSocketDisconnect:
             pass
         finally:
-            if self.tache_bascule:
-                self.tache_bascule.cancel()
+            for tache in (self.tache_bascule, self.tache_reconnexion, self.tache_annonces, self.tache_garde):
+                if tache:
+                    tache.cancel()
             memoire.desabonner(self.journees_apprises)
-            if self.tache_annonces:
-                self.tache_annonces.cancel()
             await self.interrompre()
             await self._arreter_detecteur()
             # Fermer l'onglet en mode écoute finalise le segment en cours.
@@ -402,10 +540,25 @@ class Conversation:
         maintenant = time.monotonic()
         self._derniere_activite = maintenant
         if en_cours:
+            mesure = self._mesure
+            if mesure and mesure.mp3_envoye is not None and mesure.lecture is None:
+                mesure.lecture = maintenant
+                # La lecture peut commencer (phrase d'attente) avant la première phrase du cerveau :
+                # la mesure est notée à la fin de la réponse.
+                if mesure.reponse_finie:
+                    self._terminer_mesure()
             if not self._lectures or self._lectures[-1][1] is not None:
                 self._lectures.append([maintenant, None])
         elif self._lectures and self._lectures[-1][1] is None:
             self._lectures[-1][1] = maintenant
+
+    def _terminer_mesure(self) -> None:
+        """Note la mesure de la dernière réponse (journal technique et tableau de bord)."""
+        mesure, self._mesure = self._mesure, None
+        if mesure is None or mesure.envoi is None:
+            return
+        log.info(mesure.ligne())
+        monitoring.latences.append(mesure.resume())
 
     def _joi_parlait(self, debut: float, fin: float) -> bool:
         maintenant = time.monotonic()
@@ -506,6 +659,7 @@ class Conversation:
             await self._revenir_en_conversation()
             return
         self.enregistreur = enregistreur
+        self.garde_silence.reprendre()
         self.detecteur_retour = commande_vocale.DetecteurRetour(sur_retour=self._retour_vocal)
         self.detecteur_retour.demarrer()
         await self.envoyer(type="etat", etat="ecoute")
@@ -555,8 +709,78 @@ class Conversation:
             await self.oreilles.ouvrir()
         except Exception as e:
             log.exception("Réouverture des oreilles impossible")
-            await self.signaler_erreur(f"Je n'arrive plus à t'entendre : {e}")
+            await self.signaler_erreur(f"Je n'arrive plus à t'entendre : {e}. J'essaie encore…")
+            self._reconnecter_en_fond()
         await self.envoyer(type="etat", etat="ecoute")
+
+    # ---------- Oreilles coupées ----------
+
+    def _oreilles_coupees(self, oreilles: Oreilles, code: int | None, raison: str) -> None:
+        """AssemblyAI a fermé la session sans qu'on le demande (3 h atteintes, erreur, réseau). En
+        conversation, Joi recrée ses oreilles avec un délai croissant ; en écoute, la session est
+        déjà fermée exprès et le retour en conversation en ouvrira une nouvelle."""
+        if oreilles is not self.oreilles or self.mode != "conversation":
+            return
+        if not oreilles.recuperable:
+            log.error("Oreilles coupées (code %s, %s) : une nouvelle session échouerait de la même façon.",
+                      code, raison)
+            _en_fond(self.signaler_erreur(f"Je ne t'entends plus ({raison or code}). Relance-moi une fois "
+                                          "le problème réglé."))
+            return
+        _en_fond(self.signaler_erreur("Je ne t'entends plus : je me reconnecte…"))
+        self._reconnecter_en_fond()
+
+    def _reconnecter_en_fond(self) -> None:
+        if self.tache_reconnexion and not self.tache_reconnexion.done():
+            return  # la tâche en cours verra que les oreilles actuelles sont coupées
+        self.tache_reconnexion = asyncio.create_task(self._reconnecter_oreilles())
+
+    def _a_reconnecter(self) -> bool:
+        return self.mode == "conversation" and self.oreilles.coupee and self.oreilles.recuperable
+
+    async def _reconnecter_oreilles(self) -> None:
+        """De nouvelles oreilles, tant que Joi est en conversation et que les siennes sont coupées.
+        Un changement de mode entre deux essais (écoute, ou retour qui ouvre ses propres oreilles)
+        arrête les essais ; le verrou du mode évite de se croiser avec lui. Des oreilles qui tombent
+        aussitôt rouvertes (pendant que cette tâche finit) sont reprises ici, avec un délai qui
+        continue de croître : la vérification de la boucle ne cède pas la main avant de finir."""
+        essai = 0
+        while self._a_reconnecter():
+            essai += 1
+            await asyncio.sleep(DELAIS_RECONNEXION[min(essai, len(DELAIS_RECONNEXION)) - 1])
+            async with self._verrou_mode:
+                if not self._a_reconnecter():
+                    return
+                nouvelles = self._nouvelles_oreilles()
+                try:
+                    await nouvelles.ouvrir()
+                except Exception as e:
+                    log.warning("Reconnexion des oreilles : essai %d raté (%s)", essai, e)
+                    continue
+                self.oreilles = nouvelles
+            log.info("Oreilles reconnectées (essai %d) : nouvelle session AssemblyAI.", essai)
+            await self.signaler_erreur("Je t'entends de nouveau.")
+            if not (self.tache_reponse and not self.tache_reponse.done()):
+                await self.envoyer(type="etat", etat="ecoute")
+
+    # ---------- Silence total en écoute ----------
+
+    async def _surveiller_audio(self) -> None:
+        while True:
+            await asyncio.sleep(INTERVALLE_GARDE_SILENCE)
+            await self._verifier_silence()
+
+    async def _verifier_silence(self) -> None:
+        """En écoute, plus aucun audio alors que le WebSocket est ouvert : l'enregistrement est arrêté
+        sans que personne le voie. On le dit au navigateur, et au journal (donc au tableau de bord)."""
+        if self.mode != "ecoute" or not self.enregistreur:
+            return
+        absence = self.garde_silence.verifier()
+        if absence is None:
+            return
+        log.warning("Écoute : aucun audio reçu depuis %.0f s (micro coupé ? onglet gelé ?).", absence)
+        await self.signaler_erreur(f"Je n'entends plus rien depuis {absence:.0f} s : le micro est-il "
+                                   "toujours branché ?")
 
     async def _arreter_detecteur(self) -> None:
         detecteur, self.detecteur_retour = self.detecteur_retour, None
@@ -580,10 +804,13 @@ class Conversation:
         self._derniere_activite = time.monotonic()
         await self.envoyer(type="transcription", texte=tour.texte, final=tour.final)
 
+        # Ce rappel vient de la réception d'AssemblyAI : rien ici ne doit attendre longtemps, sinon
+        # les transcriptions s'arrêtent. L'interruption (jusqu'à 5 s d'abort du cerveau) part donc
+        # dans une tâche, et la réponse attend qu'elle soit finie.
         if not tour.final:
             # On parle par-dessus Joi : elle se tait.
             if len(tour.texte.split()) >= MOTS_POUR_INTERROMPRE:
-                await self.interrompre()
+                self._interrompre_en_fond()
             return
 
         if not tour.texte:
@@ -593,32 +820,61 @@ class Conversation:
             log.info("Commande vocale : « %s »", tour.texte)
             self._basculer_en_fond("ecoute")
             return
-        await self.interrompre()
-        self.tache_reponse = asyncio.create_task(self.repondre(tour.texte))
+        interruption = self._interrompre_en_fond()
+        self.tache_reponse = asyncio.create_task(self._repondre_apres(interruption, tour))
 
-    async def interrompre(self) -> None:
-        tache = self.tache_reponse
-        self.tache_reponse = None
+    async def _repondre_apres(self, interruption: asyncio.Task, tour: Tour) -> None:
+        # shield : si cette réponse est elle-même interrompue pendant l'attente, l'interruption
+        # précédente va quand même au bout (la suivante l'attend).
+        await asyncio.shield(interruption)
+        await self.repondre(tour.texte, tour=tour)
+
+    def _interrompre_en_fond(self) -> asyncio.Task:
+        """Coupe la réponse en cours tout de suite (une réponse qui attendait son tour ne partira
+        jamais), puis arrête le cerveau dans une tâche. Les interruptions s'enchaînent dans l'ordre :
+        une nouvelle réponse ne part qu'une fois la précédente vraiment arrêtée."""
+        tache, self.tache_reponse = self.tache_reponse, None
         if tache and not tache.done():
             tache.cancel()
+        else:
+            tache = None
+        precedente = self._tache_interruption
+        self._tache_interruption = asyncio.create_task(self._interrompre(tache, precedente))
+        return self._tache_interruption
+
+    async def _interrompre(self, tache: asyncio.Task | None, precedente: asyncio.Task | None) -> None:
+        if precedente and not precedente.done():
+            await asyncio.wait([precedente])
+        if tache:
             try:
                 await tache
             except asyncio.CancelledError:
                 pass
-            await self.cerveau.interrompre()
+            except Exception:
+                log.exception("Réponse mal terminée")
+            await self.cerveau.interrompre()  # sans effet si le cerveau ne répondait pas
         try:
             await self.envoyer(type="stop_audio")
         except Exception:
             pass
 
-    async def repondre(self, texte: str, systeme: bool = False) -> None:
+    async def interrompre(self) -> None:
+        """Coupe la réponse en cours et attend qu'elle soit arrêtée (changement de mode, fermeture)."""
+        await asyncio.shield(self._interrompre_en_fond())
+
+    async def repondre(self, texte: str, systeme: bool = False, tour: Tour | None = None) -> None:
         """La réponse de Joi à ce que la personne a dit (ou tapé). systeme : un message glissé par le
         serveur (un courriel reçu, une écoute apprise) ; Joi peut alors répondre [rien], qui n'est ni dit ni écrit au journal."""
+        mesure = None
         if not systeme:
+            if self._mesure:  # la réponse précédente n'a jamais été jouée : on la note quand même
+                self._terminer_mesure()
+            mesure = self._mesure = MesureReponse(tour)
             journal.noter("toi", texte)
             await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
-        dites: list[str] = []
+        dites: list[str] = []  # les phrases données par le cerveau
+        envoyees: list[str] = []  # celles vraiment parties vers le navigateur : ce que retient le journal
         termine = False
         silence = False  # elle a répondu [rien] à un message système
         debut = time.perf_counter()
@@ -626,27 +882,63 @@ class Conversation:
         recherches = consultations = 0
         attente_dite = False
 
-        async def dire(phrase: str) -> None:
+        # La voix : chaque phrase est synthétisée dès que le cerveau la donne (SYNTHESES_EN_AVANCE à
+        # la fois au plus), pendant que les précédentes partent vers le navigateur, toujours dans
+        # l'ordre. Avant, la phrase suivante attendait la fin de la synthèse de la précédente.
+        a_envoyer: asyncio.Queue = asyncio.Queue()  # (phrase, tâche de synthèse, attente ?), puis None
+        syntheses: list[asyncio.Task] = []
+        limite = asyncio.Semaphore(SYNTHESES_EN_AVANCE)
+
+        async def synthetiser(phrase: str) -> tuple[bytes, dict]:
+            async with limite:
+                infos: dict = {}
+                return await voix.synthetiser(phrase, infos), infos
+
+        async def envoyer_dans_l_ordre() -> None:
             nonlocal a_parle
+            while (suivante := await a_envoyer.get()) is not None:
+                phrase, synthese, attente = suivante
+                await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
+                # La phrase d'attente (« Laisse-moi me rappeler… ») n'a jamais été journalisée. On la
+                # reconnaît à son marqueur, pas à son texte : le cerveau peut dire la même phrase.
+                if not attente:
+                    envoyees.append(phrase)
+                try:
+                    audio, infos = await synthese
+                except Exception as e:  # une phrase sans voix (le sous-titre reste) plutôt que tout perdre
+                    # Le type seulement : le message peut reprendre la réponse du fournisseur de voix.
+                    log.warning("Synthèse impossible : %s", type(e).__name__)
+                    continue
+                if audio:
+                    if not a_parle:
+                        await self.envoyer(type="etat", etat="parle")
+                        a_parle = True
+                    await self.envoyer_audio(audio)
+                    if mesure and mesure.mp3_envoye is None:
+                        mesure.synthese, mesure.mp3_envoye = infos, time.monotonic()
+
+        envoi = asyncio.create_task(envoyer_dans_l_ordre())
+
+        async def dire(phrase: str, attente: bool = False) -> None:
             if systeme and not a_parle and not dites:
                 await self.envoyer(type="etat", etat="reflechit")  # efface le sous-titre précédent
-            await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
-            audio = await voix.synthetiser(phrase)
-            if audio:
-                if not a_parle:
-                    await self.envoyer(type="etat", etat="parle")
-                    a_parle = True
-                await self.envoyer_audio(audio)
+            synthese = asyncio.create_task(synthetiser(phrase))
+            # Une synthèse ratée après une interruption n'est jamais attendue : on lit son erreur.
+            synthese.add_done_callback(lambda t: t.cancelled() or t.exception())
+            syntheses.append(synthese)
+            a_envoyer.put_nowait((phrase, synthese, attente))
 
         async def attendre(phrases: list[str]) -> None:
             # Une seule phrase d'attente, et seulement si elle n'a encore rien dit.
             nonlocal attente_dite
             if not attente_dite and not dites and not systeme:
                 attente_dite = True
-                await dire(random.choice(phrases))
+                await dire(random.choice(phrases), attente=True)
 
         try:
             async for morceau in self.cerveau.repondre(texte, systeme=systeme):
+                if mesure:
+                    mesure.envoi, mesure.premier_token = self.cerveau.envoi, self.cerveau.premier_token
                 if isinstance(morceau, RECHERCHE):
                     recherches += 1
                     log.info("Joi fouille sa mémoire (%.1f s) : %r",
@@ -665,8 +957,12 @@ class Conversation:
                     continue
                 if premiere_phrase is None:
                     premiere_phrase = time.perf_counter() - debut
+                    if mesure:
+                        mesure.premiere_phrase = time.monotonic()
                 dites.append(morceau)
                 await dire(morceau)
+            a_envoyer.put_nowait(None)
+            await envoi  # toute la voix est partie
             termine = True
             if silence:
                 log.info("Message système : Joi a choisi de ne rien dire.")
@@ -686,8 +982,19 @@ class Conversation:
             await self.signaler_erreur(f"Oups, j'ai perdu le fil : {e}")
             await self.envoyer(type="etat", etat="ecoute")
         finally:
-            journal.noter("joi", " ".join(dites), interrompu=not termine)
+            # Une interruption annule les synthèses en attente et ce qui restait à envoyer.
+            for tache in (envoi, *syntheses):
+                tache.cancel()
+            # Seulement ce qui est parti : après une interruption, les phrases encore en synthèse n'ont
+            # été ni dites ni montrées, et la mémoire (consolidée depuis le journal) ne doit pas le croire.
+            journal.noter("joi", " ".join(envoyees), interrompu=not termine)
             self._derniere_activite = time.monotonic()
+            if mesure:
+                mesure.recherches = recherches
+                mesure.reponse_finie = True
+                # Sans son, ou déjà en lecture : rien de plus à attendre du navigateur.
+                if self._mesure is mesure and (mesure.mp3_envoye is None or mesure.lecture is not None):
+                    self._terminer_mesure()
 
     # ---------- Courriels reçus (compte de Joi) ----------
 

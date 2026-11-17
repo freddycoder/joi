@@ -41,13 +41,22 @@ Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcript
 | `joi/transcription.py` | Mode écoute : transcription différée, avec séparation des voix par AssemblyAI |
 | `joi/empreintes.py` | Mode écoute : reconnaissance des voix sur toute la journée (empreintes vocales locales) |
 | `joi/commande_vocale.py` | « Joi, écoute seulement » et « Joi, reviens » |
-| `joi/serveur.py` | Relie le tout, gère les modes et les interruptions |
+| `joi/serveur.py` | Relie le tout, gère les modes, les interruptions et les coupures |
+| `joi/banc.py` | Banc d'essai des modèles Copilot (temps jusqu'à la première phrase) |
 | `joi/compte/` | Optionnel : le courriel, l'agenda et les tâches de Joi, par un serveur MCP (voir « Le compte de Joi ») |
 | `frontend/` | Interface : hologramme, micro, lecture audio, sous-titres |
 
 **Diagnostics.** `Alt+P` ouvre les paramètres en vigueur (panneau de gauche), `Alt+M` le monitoring
 (panneau de droite : signal du micro et de la voix, temps de réponse, voix, écoute, transcription, mémoire,
 derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'hologramme reste au centre.
+
+**Latence.** Chaque réponse ajoute une ligne « Latence : » au journal technique, et le bloc « Latence » du
+monitoring montre la dernière réponse et la médiane : fin de tour (AssemblyAI décide que tu as fini de
+parler), cerveau (premier mot, première phrase), synthèse de la voix, début de la lecture, et le total de
+la fin de ta phrase au premier son. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
+`JOI_FIN_TOUR_SILENCE_MIN_MS` / `_MAX_MS` dans `.env` (vides : les valeurs d'AssemblyAI). Pour comparer
+les modèles Copilot, sans micro : `.venv\Scripts\python -m joi.banc MODELE1 MODELE2` (chaque phrase
+consomme une requête Copilot ; `--lister`, `--phrases N`). Il ne change pas `JOI_MODELE`.
 
 On peut interrompre Joi en lui parlant par-dessus : elle se tait et écoute.
 On peut aussi lui écrire au clavier (champ en bas de l'écran).
@@ -109,6 +118,13 @@ lui donne le résumé complet de cette journée.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
 Garde l'onglet ouvert et branche le portable.
+
+**Coupures.** Si la liaison avec le serveur tombe (Joi relancée, portable sorti de veille), la page se
+reconnecte seule, sans clic, et reprend l'écoute : l'indicateur rouge clignote et affiche « interrompu »
+tant que la liaison n'est pas revenue. Une nouvelle séance commence alors ; la précédente est gardée et
+transcrite comme les autres. Si le micro s'arrête (débranché, permission retirée), ou si plus aucun son
+n'arrive au serveur pendant 30 s, un message le dit à l'écran et dans le journal technique. En
+conversation, Joi rouvre aussi seule sa liaison avec AssemblyAI si elle tombe (au plus tard après 3 h).
 
 ### Reconnaissance des voix
 
@@ -284,17 +300,14 @@ Chaque rangement est enregistré dans un dépôt git **local** (sans remote) :
 Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime `donnees/memoire/`,
 `donnees/journal/` et `donnees/enregistrements/`.
 
-## Prochaines étapes envisagées
 
-P1
-- Aucune pour l'instant
+## Tests
 
-P2
-- MCP pour icloud
-- Remettre JOI_GARDER_AUDIO=non et effacer les MP3 de test et le cache du rejeu.
+```
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest
+```
 
-P3
-- Compétences sous forme d'outils dans le serveur MCP du compte : nouvelles, tutorat
-- Nommer une voix avec l'accord de la personne (« Joi, voici Denis, il est d'accord »)
-- Avatar 2D/3D avec synchronisation des lèvres
-- Application de bureau (Tauri)
+Les tests n'utilisent **jamais** `donnees/` : `tests/conftest.py` fait pointer `JOI_DONNEES` vers un
+dossier temporaire avant d'importer Joi, et arrête tout si ce n'est pas le cas. Ils ne font aucun appel
+réseau (pas de clé AssemblyAI, pas de compte) et ne chargent ni PyTorch ni Vosk : quelques secondes.

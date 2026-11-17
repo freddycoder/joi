@@ -1,0 +1,3 @@
+-r requirements.txt
+# Tests : .venv\Scripts\python -m pytest (voir README, « Tests »)
+pytest>=8

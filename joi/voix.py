@@ -71,8 +71,11 @@ async def _assemblyai(texte: str) -> bytes:
     return reponse.content
 
 
-async def synthetiser(texte: str) -> bytes:
-    """Retourne l'audio MP3 de la phrase, ou b"" s'il n'y a rien à dire."""
+async def synthetiser(texte: str, infos: dict | None = None) -> bytes:
+    """Retourne l'audio MP3 de la phrase, ou b"" s'il n'y a rien à dire.
+    infos reçoit « cache » (déjà synthétisée) et « duree_s », pour la mesure de la latence."""
+    debut = time.perf_counter()
+    infos = {} if infos is None else infos
     texte = nettoyer(texte)
     if not re.search(r"\w", texte):
         return b""
@@ -81,9 +84,17 @@ async def synthetiser(texte: str) -> bytes:
     fichier = config.DOSSIER_VOIX / f"{cle}.mp3"
     if fichier.exists():
         monitoring.voix["cache"] += 1
+        infos.update(cache=True, duree_s=time.perf_counter() - debut)
         return fichier.read_bytes()
 
-    debut = time.perf_counter()
+    infos["cache"] = False
+    try:
+        return await _synthetiser(texte, fichier, debut)
+    finally:
+        infos["duree_s"] = time.perf_counter() - debut
+
+
+async def _synthetiser(texte: str, fichier, debut: float) -> bytes:
     if config.JOI_TTS == "assemblyai":
         try:
             audio = await _assemblyai(texte)

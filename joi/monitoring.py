@@ -20,6 +20,21 @@ transcription = {"secondes": 0.0, "cout": 0.0, "segments": 0, "derniere": None}
 # Les derniers messages du journal technique de Joi (logs « joi.* »), pour le panneau.
 evenements: deque[dict] = deque(maxlen=40)
 
+# Où part le temps des dernières réponses (joi/serveur.py, MesureReponse.resume()), en secondes.
+latences: deque[dict] = deque(maxlen=50)
+ETAPES_LATENCE = ("fin_de_tour", "premier_mot", "premiere_phrase", "synthese", "lecture", "total")
+
+
+def resume_latences() -> dict:
+    """La dernière réponse, et la médiane de chaque étape sur les dernières réponses sans recherche
+    en mémoire (une recherche ajoute plusieurs secondes et brouillerait la médiane)."""
+    simples = [m for m in latences if not m.get("recherches")]
+    medianes = {}
+    for etape in ETAPES_LATENCE:
+        valeurs = sorted(m[etape] for m in simples if m.get(etape) is not None)
+        medianes[etape] = valeurs[len(valeurs) // 2] if valeurs else None
+    return {"derniere": latences[-1] if latences else None, "mediane": medianes, "reponses": len(simples)}
+
 
 class _Capteur(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
@@ -61,6 +76,7 @@ def parametres() -> list[dict]:
             ("Clé AssemblyAI", "présente" if config.ASSEMBLYAI_API_KEY else "MANQUANTE"),
             ("Modèle temps réel", config.ASSEMBLYAI_MODELE),
             ("Mots-clés", ", ".join(config.MOTS_CLES)),
+            ("Fin de tour", _fin_de_tour()),
         ],
         "Cerveau": [("Modèle Copilot", config.JOI_MODELE or "automatique")],
         "Mode écoute": [
@@ -104,6 +120,15 @@ def _compte() -> list[tuple[str, str]]:
         ("Fuseau", reglages.NOM_FUSEAU),
         ("Application Entra", "présente" if reglages.MS_CLIENT_ID else "MANQUANTE"),
     ]
+
+
+def _fin_de_tour() -> str:
+    morceaux = [config.ASSEMBLYAI_FIN_TOUR_MODE or "mode d'AssemblyAI"]
+    if config.ASSEMBLYAI_SILENCE_MIN_MS is not None:
+        morceaux.append(f"silence min {config.ASSEMBLYAI_SILENCE_MIN_MS} ms")
+    if config.ASSEMBLYAI_SILENCE_MAX_MS is not None:
+        morceaux.append(f"max {config.ASSEMBLYAI_SILENCE_MAX_MS} ms")
+    return " · ".join(morceaux)
 
 
 def _ta_voix() -> str:

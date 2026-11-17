@@ -17,6 +17,8 @@ import logging
 import re
 import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -259,12 +261,16 @@ def _extrait(lignes: list[str], normalisees: list[str], poids: dict[str, float],
     return _couper("\n".join(lignes[j] for j in sorted(retenues)), taille)
 
 
-def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
+def souvenir(recherche: str, aujourdhui: date | None = None, stats: dict | None = None) -> str:
     """Cherche dans les fichiers de mémoire, puis dans le journal des conversations.
 
     Une journée nommée (« aujourd'hui », « hier », « 16 novembre ») donne d'abord son résumé complet
     (journees/AAAA-MM-JJ.md) : une recherche par mots-clés ne le retrouve pas, car « novembre » ou
-    « 2026 » se trouvent dans tous les résumés. Le reste de la recherche sert de mots-clés."""
+    « 2026 » se trouvent dans tous les résumés. Le reste de la recherche sert de mots-clés.
+
+    Tout est relu à chaque appel (aucun index) : c'est lent sur un gros journal, d'où l'appel dans
+    un fil à part (voir chercher_souvenir). stats reçoit le volume lu."""
+    stats = {} if stats is None else stats
     jours, reste = _dates_nommees(recherche, aujourdhui or date.today())
     resultats = []
 
@@ -291,9 +297,15 @@ def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
     for fichier in _fichiers_md():
         if fichier.resolve() in deja_montres:
             continue
-        lignes = fichier.read_text(encoding="utf-8").splitlines()
+        try:
+            contenu = fichier.read_text(encoding="utf-8")
+        except OSError:  # déplacé ou supprimé par la bibliothécaire pendant la recherche
+            continue
+        stats["memoire_octets"] = stats.get("memoire_octets", 0) + len(contenu.encode("utf-8"))
+        lignes = contenu.splitlines()
         normalisees = [journal.normaliser(l) for l in lignes]
         fichiers.append((fichier, lignes, normalisees, "\n".join(normalisees)))
+    stats["memoire_fichiers"] = len(fichiers)
     # Un mot présent dans un seul fichier compte pour 1, dans quatre fichiers pour 1/4.
     presences = {m: sum(m in texte for *_, texte in fichiers) for m in mots}
     poids = {m: 1 / n for m, n in presences.items() if n}
@@ -307,7 +319,7 @@ def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
 
     # 3. Journal : les échanges mot pour mot (et ce qui a été entendu en mode écoute), seulement
     # des journées nommées s'il y en a.
-    entrees = journal.chercher(mots, limite=8, dates=set(jours) or None) if mots else []
+    entrees = journal.chercher(mots, limite=8, dates=set(jours) or None, stats=stats) if mots else []
 
     # Les fichiers et le journal se partagent l'extrait : un seul fichier ne le remplit plus.
     sections = len(retenus) + (1 if entrees else 0)
@@ -352,6 +364,35 @@ def _qui(entree: dict) -> str:
     return "toi" if entree.get("qui") == "toi" else "Joi"
 
 
+def chercher_souvenir(recherche: str) -> str:
+    """souvenir(), avec sa durée et le volume lu dans le journal technique : pour savoir quand la
+    relecture complète devient trop lente et qu'il faut un index (SQLite FTS5, par exemple)."""
+    debut = time.perf_counter()
+    stats: dict = {}
+    try:
+        return souvenir(recherche, stats=stats)
+    finally:
+        # Sans le texte de la recherche : le serveur l'a déjà noté (« Joi fouille sa mémoire »).
+        log.info(
+            "Recherche dans la mémoire : %.0f ms, %d fichier(s) de mémoire (%d Ko), %d jour(s) de journal (%d Ko)",
+            (time.perf_counter() - debut) * 1000,
+            stats.get("memoire_fichiers", 0), stats.get("memoire_octets", 0) // 1024,
+            stats.get("journal_jours", 0), stats.get("journal_octets", 0) // 1024,
+        )
+
+
+# Le SDK Copilot appelle les handlers sur la boucle asyncio du serveur et attend leur résultat s'il
+# est awaitable (copilot/tools.py, wrapped_handler). Une recherche relit toute la mémoire et jusqu'à
+# 60 jours de journal : dans un fil à part, l'audio, le WebSocket et les annonces ne se figent pas.
+# Un seul fil, à elle : les lectures de la mémoire passent une à une, et une rafale de recherches
+# n'occupe pas les fils partagés (reconnaissance des voix, rechargement des manifestes…).
+_FIL_MEMOIRE = ThreadPoolExecutor(max_workers=1, thread_name_prefix="joi-memoire")
+
+
+def _dans_le_fil(fonction: Callable, *arguments) -> asyncio.Future:
+    return asyncio.get_running_loop().run_in_executor(_FIL_MEMOIRE, fonction, *arguments)
+
+
 outil_se_souvenir = define_tool(
     "se_souvenir",
     description=(
@@ -362,7 +403,7 @@ outil_se_souvenir = define_tool(
         "une conversation avec toi. « [entendu, toi (voix reconnue)] » : la personne, reconnue à sa voix. "
         "« voix A » ou « voix inconnue » : quelqu'un d'autre, ou la personne si sa voix n'a pas été reconnue."
     ),
-    handler=lambda p, _: souvenir(p.recherche),
+    handler=lambda p, _: _dans_le_fil(chercher_souvenir, p.recherche),
     params_type=ParametresSouvenir,
     skip_permission=True,
     idempotent=True,
@@ -402,6 +443,9 @@ def lire(chemin: str) -> str:
 def ecrire(chemin: str, contenu: str) -> str:
     fichier = _chemin_md(chemin)
     fichier.parent.mkdir(parents=True, exist_ok=True)
+    # Pas d'écriture atomique (fichier temporaire + os.replace) : sous Windows, le remplacement échoue
+    # si la recherche (dans son fil) a le fichier ouvert. Au pire, une recherche lit une fois un
+    # fichier à moitié écrit ; le fichier lui-même n'est jamais abîmé.
     fichier.write_text(contenu.rstrip() + "\n", encoding="utf-8")
     return f"{chemin} enregistré."
 
@@ -437,10 +481,13 @@ def _nettoyer_dossiers_vides(dossier: Path) -> None:
 
 
 OUTILS_BIBLIOTHECAIRE = [
+    # La bibliothécaire travaille en fond, mais sur la même boucle que la conversation : ses lectures
+    # passent aussi par le fil de la mémoire. Les écritures, courtes, restent sur la boucle : deux
+    # d'entre elles ne peuvent pas se croiser.
     define_tool("lister", description="Liste tous les fichiers de la mémoire.",
-                handler=lambda _: lister(), skip_permission=True, idempotent=True),
+                handler=lambda _: _dans_le_fil(lister), skip_permission=True, idempotent=True),
     define_tool("lire", description="Lit un fichier de la mémoire.",
-                handler=lambda p, _: lire(p.chemin), params_type=ParametresChemin,
+                handler=lambda p, _: _dans_le_fil(lire, p.chemin), params_type=ParametresChemin,
                 skip_permission=True, idempotent=True),
     define_tool("ecrire", description="Crée ou remplace entièrement un fichier .md de la mémoire.",
                 handler=lambda p, _: ecrire(p.chemin, p.contenu), params_type=ParametresEcrire,

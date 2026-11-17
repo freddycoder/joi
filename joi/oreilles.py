@@ -12,6 +12,12 @@ Fonctionnement :
 Les mots d'un tour final (words[], start/end en ms depuis le début de la session) accompagnent le
 Tour : avec le tampon des dernières secondes envoyées (TamponAudio), le serveur retrouve l'audio du
 tour pour apprendre la voix de la personne (voir joi/empreintes.py). Ce tampon ne vit qu'en mémoire.
+
+Une coupure qui ne vient pas de fermer() (AssemblyAI ferme une session après 3 h, code 3008, ou
+après une erreur de son côté ; le réseau tombe) est signalée par sur_coupure(code, raison) : la
+conversation recrée alors des oreilles (voir joi/serveur.py). coupure_recuperable() dit si une
+nouvelle session a une chance de marcher. Codes vérifiés le 2026-11-17 dans la documentation
+d'AssemblyAI (« Common session errors and closures »).
 """
 
 import asyncio
@@ -44,6 +50,30 @@ class Tour:
     final: bool
     ordre: int
     mots: list[dict] = field(default_factory=list)  # tour final : mots avec start/end (ms de session)
+    # Tour final, pour mesurer la détection de fin de tour (time.monotonic) : l'arrivée du tour, et
+    # celle de l'audio de la fin du dernier mot (None si elle n'est plus dans le tampon).
+    recu: float | None = None
+    fin_parole: float | None = None
+
+
+def coupure_recuperable(code: int | None, raison: str = "") -> bool:
+    """Vrai si une nouvelle session a une chance de marcher après cette fermeture. Faux quand le
+    problème reviendrait à l'identique : clé refusée ou compte bloqué (1008, sauf trop de sessions
+    à la fois), message invalide (3006, sauf l'inactivité), paquets audio mal formés (3007)."""
+    raison = (raison or "").lower()
+    if code == 1008:
+        return "concurren" in raison or "too many" in raison
+    if code == 3006:
+        return "inactiv" in raison
+    if code == 3007:
+        return False
+    return True  # 1000, 1006 (réseau), 1011, 3005 (erreur du serveur), 3008 (3 h atteintes)…
+
+
+def _code_et_raison(e: ConnectionClosed) -> tuple[int, str]:
+    if e.rcvd is None:
+        return 1006, "connexion perdue sans fermeture propre"
+    return e.rcvd.code, e.rcvd.reason
 
 
 class TamponAudio:
@@ -93,13 +123,21 @@ class Oreilles:
         self,
         sur_tour: Callable[[Tour], Awaitable[None]],
         sur_erreur: Callable[[str], Awaitable[None]],
+        sur_coupure: Callable[[int | None, str], Awaitable[None]] | None = None,
     ):
         self._sur_tour = sur_tour
         self._sur_erreur = sur_erreur
+        self.sur_coupure = sur_coupure
         self._ws = None
         self._tache_ecoute: asyncio.Task | None = None
         self._dernier_tour_final = -1
         self._erreur_signalee = False
+        self._derniere_erreur = ""  # le message d'erreur d'AssemblyAI, plus parlant que la raison de fermeture
+        self._fermeture_voulue = False
+        # La session est tombée sans qu'on la ferme (ou n'a pas pu s'ouvrir) : l'audio n'est plus
+        # envoyé. recuperable : une nouvelle session a une chance de marcher (coupure_recuperable).
+        self.coupee = False
+        self.recuperable = True
         self.tampon = TamponAudio()
 
     async def ouvrir(self) -> None:
@@ -112,23 +150,37 @@ class Oreilles:
             # « Lysdor » devient « list d'or »...). Voir JOI_MOTS_CLES dans .env.
             "keyterms_prompt": json.dumps(config.MOTS_CLES),
         }
+        # La fin de tour, seulement si elle est réglée dans .env (sinon, les valeurs d'AssemblyAI).
+        if config.ASSEMBLYAI_FIN_TOUR_MODE:
+            parametres["mode"] = config.ASSEMBLYAI_FIN_TOUR_MODE
+        if config.ASSEMBLYAI_SILENCE_MIN_MS is not None:
+            parametres["min_turn_silence"] = config.ASSEMBLYAI_SILENCE_MIN_MS
+        if config.ASSEMBLYAI_SILENCE_MAX_MS is not None:
+            parametres["max_turn_silence"] = config.ASSEMBLYAI_SILENCE_MAX_MS
         url = f"{URL_STREAMING}?{urlencode(parametres)}"
         # La clé passe dans l'en-tête Authorization (sans « Bearer »), jamais dans l'URL.
-        self._ws = await websockets.connect(
-            url, additional_headers={"Authorization": config.ASSEMBLYAI_API_KEY}
-        )
+        try:
+            self._ws = await websockets.connect(
+                url, additional_headers={"Authorization": config.ASSEMBLYAI_API_KEY}
+            )
+        except BaseException:
+            self.coupee = True
+            raise
         self._tache_ecoute = asyncio.create_task(self._ecouter())
 
     async def envoyer_audio(self, pcm: bytes) -> None:
-        if self._ws is None:
+        if self._ws is None or self.coupee:
             return
         try:
             await self._ws.send(pcm)
-        except ConnectionClosed:
+        except ConnectionClosed as e:
+            # La réception le verra aussi ; le premier des deux prévient la conversation.
+            await self._signaler_coupure(*_code_et_raison(e))
             return
         self.tampon.ajouter(pcm)
 
     async def fermer(self) -> None:
+        self._fermeture_voulue = True
         if self._ws is None:
             return
         try:
@@ -142,6 +194,7 @@ class Oreilles:
             self._ws = None
 
     async def _ecouter(self) -> None:
+        code, raison = None, ""
         try:
             async for brut in self._ws:
                 message = json.loads(brut)
@@ -154,7 +207,10 @@ class Oreilles:
                         message.get("configuration"),
                     )
                 elif genre == "Turn":
-                    await self._traiter_tour(message)
+                    try:
+                        await self._traiter_tour(message)
+                    except Exception:  # un tour mal traité ne doit pas rendre Joi sourde
+                        log.exception("Tour de parole mal traité")
                 elif genre == "Termination":
                     log.info(
                         "Session AssemblyAI terminée (%s s d'audio)",
@@ -165,19 +221,40 @@ class Oreilles:
                     # AssemblyAI explique le problème dans un message juste avant de fermer.
                     detail = message.get("error") or message.get("message") or message
                     self._erreur_signalee = True
+                    self._derniere_erreur = str(detail)
                     log.error("Erreur AssemblyAI : %s", detail)
                     await self._sur_erreur(f"AssemblyAI : {detail}")
                 else:
                     log.debug("Message AssemblyAI ignoré : %s", message)
         except ConnectionClosed as e:
-            if self._erreur_signalee:
-                return
+            code, raison = _code_et_raison(e)
             # Les erreurs d'AssemblyAI (clé invalide, paramètre refusé...) arrivent
             # sous forme de fermeture du WebSocket avec un code et une raison.
-            if e.rcvd and e.rcvd.code != 1000:
-                raison = f"AssemblyAI a fermé la connexion ({e.rcvd.code}) : {e.rcvd.reason}"
-                log.error(raison)
-                await self._sur_erreur(raison)
+            if not self._erreur_signalee and not self._fermeture_voulue and code != 1000:
+                message = f"AssemblyAI a fermé la connexion ({code}) : {raison}"
+                log.error(message)
+                await self._sur_erreur(message)
+        except Exception as e:  # message illisible : on ferme plutôt que de rester sourde sans le dire
+            log.exception("Réception d'AssemblyAI interrompue")
+            code, raison = None, str(e)
+            await self._ws.close()
+        if code is None and self._ws is not None and self._ws.close_code is not None:
+            code, raison = self._ws.close_code, self._ws.close_reason or raison
+        # Une fin qui ne vient pas de fermer() : session trop longue, erreur, réseau. Même une fin
+        # « normale » (Termination non demandée, code 1000) laisse Joi sourde : on le signale.
+        await self._signaler_coupure(code, self._derniere_erreur or raison)
+
+    async def _signaler_coupure(self, code: int | None, raison: str) -> None:
+        if self._fermeture_voulue or self.coupee:
+            return
+        self.coupee = True
+        self.recuperable = coupure_recuperable(code, raison)
+        log.warning("Oreilles coupées (code %s) : %s", code, raison or "sans raison donnée")
+        if self.sur_coupure:
+            try:
+                await self.sur_coupure(code, raison)
+            except Exception:
+                log.exception("Coupure des oreilles mal signalée")
 
     async def _traiter_tour(self, message: dict) -> None:
         ordre = message.get("turn_order", 0)
@@ -187,7 +264,11 @@ class Oreilles:
                 return
             self._dernier_tour_final = ordre
             texte = message.get("utterance") or message.get("transcript", "")
-            await self._sur_tour(Tour(texte.strip(), True, ordre, message.get("words") or []))
+            mots = message.get("words") or []
+            # L'instant où l'audio de la fin du dernier mot est arrivé : la différence avec maintenant
+            # est le temps qu'AssemblyAI a mis à décider que la personne avait fini de parler.
+            fin_parole = self.tampon.instant(max(int(mots[-1].get("end") or 0) - 1, 0)) if mots else None
+            await self._sur_tour(Tour(texte.strip(), True, ordre, mots, time.monotonic(), fin_parole))
         else:
             # Transcription partielle : les mots déjà confirmés + ceux encore en cours.
             mots = message.get("words") or []

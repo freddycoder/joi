@@ -13,6 +13,25 @@ ASSEMBLYAI_MODELE = os.getenv("ASSEMBLYAI_MODELE", "universal-3-6-pro").strip()
 # Noms propres et mots inventés que la reconnaissance vocale doit privilégier, séparés par des virgules.
 MOTS_CLES = ["Joi"] + [m.strip() for m in os.getenv("JOI_MOTS_CLES", "").split(",") if m.strip()]
 
+
+def _entier_ou_rien(nom: str) -> int | None:
+    try:
+        return int(os.getenv(nom, "").strip())
+    except ValueError:
+        return None
+
+
+# Fin de tour d'AssemblyAI (quand décide-t-elle que tu as fini de parler ?). Vide : la valeur
+# d'AssemblyAI, comme avant. Paramètres de Universal-3 Pro Streaming vérifiés le 2026-11-17 :
+#   mode : min_latency, balanced (celui d'AssemblyAI par défaut) ou max_accuracy ;
+#   min_turn_silence (ms, 50 à 10 000) : silence minimal avant de pouvoir finir un tour ;
+#   max_turn_silence (ms) : silence qui finit le tour quoi qu'il arrive (640, 1280 ou 2560 selon le mode).
+ASSEMBLYAI_FIN_TOUR_MODE = os.getenv("JOI_FIN_TOUR_MODE", "").strip().lower()
+if ASSEMBLYAI_FIN_TOUR_MODE not in ("", "min_latency", "balanced", "max_accuracy"):
+    ASSEMBLYAI_FIN_TOUR_MODE = ""
+ASSEMBLYAI_SILENCE_MIN_MS = _entier_ou_rien("JOI_FIN_TOUR_SILENCE_MIN_MS")
+ASSEMBLYAI_SILENCE_MAX_MS = _entier_ou_rien("JOI_FIN_TOUR_SILENCE_MAX_MS")
+
 JOI_VOIX = os.getenv("JOI_VOIX", "fr-CA-SylvieNeural").strip()
 JOI_DEBIT = os.getenv("JOI_DEBIT", "+0%").strip()
 # Moteur de synthèse vocale : « edge » (edge-tts, par défaut) ou « assemblyai ».
@@ -66,7 +85,12 @@ JOI_COMPTE = _compte if _compte in COMPTES_PRIS_EN_CHARGE else None
 # et l'écrit au journal technique (voir le démarrage de joi/serveur.py).
 JOI_COMPTE_REFUSE = _compte if _compte and not JOI_COMPTE else None
 
-DOSSIER_DONNEES = RACINE / "donnees"
+# Le dossier des données (mémoire, journal, enregistrements, empreintes, logs). JOI_DONNEES sert aux
+# tests (tests/conftest.py), qui ne doivent jamais toucher la vraie mémoire. Plusieurs modules figent
+# leurs chemins à l'import (memoire.RACINE, journal.FICHIER_CONSOLIDATION…) : la variable doit donc
+# être définie avant le premier import de joi.
+_donnees = os.getenv("JOI_DONNEES", "").strip()
+DOSSIER_DONNEES = Path(_donnees).resolve() if _donnees else RACINE / "donnees"
 DOSSIER_VOIX = DOSSIER_DONNEES / "voix"
 DOSSIER_JOURNAL = DOSSIER_DONNEES / "journal"
 DOSSIER_MEMOIRE = DOSSIER_DONNEES / "memoire"
