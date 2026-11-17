@@ -7,6 +7,7 @@ puisse commencer à parler avant que la réponse complète soit écrite.
 import asyncio
 import logging
 import re
+import time
 from typing import AsyncIterator
 
 from copilot import CopilotClient
@@ -48,7 +49,16 @@ def refuser_permission(requete, invocation):
 
 
 class Cerveau:
-    def __init__(self):
+    """modele : le modèle Copilot (JOI_MODELE par défaut ; le banc d'essai en essaie d'autres).
+    avec_compte : brancher le compte de Joi s'il est réglé (le banc d'essai s'en passe)."""
+
+    def __init__(self, modele: str | None = config.JOI_MODELE, avec_compte: bool = True):
+        self.modele = modele
+        self._avec_compte = avec_compte
+        # La dernière réponse, pour la mesure de la latence (time.monotonic) : l'envoi du message,
+        # et l'arrivée du premier morceau de texte.
+        self.envoi: float | None = None
+        self.premier_token: float | None = None
         self._client: CopilotClient | None = None
         self._session = None
         self._boucle: asyncio.AbstractEventLoop | None = None
@@ -65,7 +75,7 @@ class Cerveau:
         outils_permis = [memoire.outil_se_souvenir.name]
         permission = refuser_permission
         options = {}
-        if config.JOI_COMPTE:
+        if config.JOI_COMPTE and self._avec_compte:
             # Le compte (optionnel) : ses outils MCP, ses consignes et le contexte du réveil. Sans
             # JOI_COMPTE, rien de joi.compte n'est importé et la session reste celle d'avant.
             from .compte.integration import Integration
@@ -83,7 +93,7 @@ class Cerveau:
             available_tools=outils_permis,
             on_permission_request=permission,
             system_message={"mode": "replace", "content": consignes},
-            model=config.JOI_MODELE,
+            model=self.modele,
             streaming=True,
             skip_custom_instructions=True,
             working_directory=str(config.DOSSIER_DONNEES),
@@ -134,6 +144,7 @@ class Cerveau:
         systeme : le message ne vient pas de la personne (un courriel reçu, glissé par le serveur)."""
         self._file = asyncio.Queue()
         self._inactif.clear()
+        self.envoi, self.premier_token = time.monotonic(), None
         if systeme:
             await self._session.send(texte, source="system")
         else:
@@ -152,6 +163,8 @@ class Cerveau:
                 if isinstance(morceau, (_Recherche, _Consultation)):
                     yield morceau
                     continue
+                if self.premier_token is None:
+                    self.premier_token = time.monotonic()
                 tampon += morceau
                 phrases, tampon = couper_phrases(tampon)
                 for phrase in phrases:

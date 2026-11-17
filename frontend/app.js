@@ -665,6 +665,20 @@ async function rafraichirMonitoring() {
     return;
   }
 
+  // Où part le temps, de la fin de ta phrase au premier son : dernière réponse · médiane.
+  const lat = d.latence ?? { derniere: null, mediane: {}, reponses: 0 };
+  const sec = (v) => (v == null ? "—" : `${v.toFixed(1)} s`);
+  const etape = (cle) => `${sec(lat.derniere?.[cle])} · ${sec(lat.mediane[cle])}`;
+  remplir("mon-latence", [
+    ["Dernière · médiane", `${lat.reponses} réponse(s) sans recherche`],
+    ["Fin de tour", etape("fin_de_tour")],
+    ["Cerveau, 1er mot", etape("premier_mot")],
+    ["Cerveau, 1re phrase", etape("premiere_phrase")],
+    ["Synthèse", etape("synthese") + (lat.derniere?.cache ? " (cache)" : "")],
+    ["Début de lecture", etape("lecture")],
+    ["Total", etape("total"), lat.mediane.total > 3 ? "attention" : ""],
+  ]);
+
   const v = d.voix;
   remplir("mon-voix", [
     ["Dernier moteur", v.moteur ?? "—", v.moteur?.includes("repli") ? "attention" : ""],

@@ -257,7 +257,8 @@ async def api_monitoring(requete: Request):
         "segments": dict(segments),
         "seances": [c.etat_ecoute() for c in _conversations if c.enregistreur],
     }
-    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute, "compte": _etat_compte()}
+    return {**await asyncio.to_thread(_etat_disque), "ecoute": ecoute, "compte": _etat_compte(),
+            "latence": monitoring.resume_latences()}
 
 
 def _etat_compte() -> dict:
@@ -286,6 +287,61 @@ def _etat_disque() -> dict:
         },
         "evenements": list(monitoring.evenements)[-15:],
     }
+
+
+class MesureReponse:
+    """Où part le temps d'une réponse, de la fin de ta phrase au premier son (instants time.monotonic) :
+
+      fin de parole → tour final   AssemblyAI décide que tu as fini (l'audio du dernier mot est arrivé
+                                   à fin_parole, voir Oreilles._traiter_tour)
+      envoi → 1er mot → 1re phrase le cerveau (Copilot)
+      synthèse                     la voix de la première phrase (en distinguant le cache)
+      MP3 envoyé → lecture         le navigateur décode et commence à jouer (message « lecture »)
+
+    Le premier son peut être une phrase d'attente (« Laisse-moi me rappeler… ») quand Joi fouille sa
+    mémoire : c'est bien ce que la personne entend en premier."""
+
+    def __init__(self, tour: Tour | None):
+        self.fin_parole = tour.fin_parole if tour else None
+        self.tour_final = tour.recu if tour else None
+        self.envoi: float | None = None
+        self.premier_token: float | None = None
+        self.premiere_phrase: float | None = None
+        self.synthese: dict | None = None  # {"cache", "duree_s"} de la première phrase dite
+        self.mp3_envoye: float | None = None
+        self.lecture: float | None = None
+        self.recherches = 0
+        self.reponse_finie = False
+
+    @staticmethod
+    def _ecart(a: float | None, b: float | None) -> float | None:
+        return round(b - a, 2) if a is not None and b is not None else None
+
+    def resume(self) -> dict:
+        debut = self.fin_parole or self.tour_final or self.envoi
+        return {
+            "fin_de_tour": self._ecart(self.fin_parole, self.tour_final),
+            "premier_mot": self._ecart(self.envoi, self.premier_token),
+            "premiere_phrase": self._ecart(self.envoi, self.premiere_phrase),
+            "synthese": round(self.synthese["duree_s"], 2) if self.synthese else None,
+            "cache": self.synthese.get("cache") if self.synthese else None,
+            "lecture": self._ecart(self.mp3_envoye, self.lecture),
+            "total": self._ecart(debut, self.lecture or self.mp3_envoye),
+            "recherches": self.recherches,
+        }
+
+    def ligne(self) -> str:
+        r = self.resume()
+
+        def s(cle: str) -> str:
+            return f"{r[cle]:.1f} s" if r[cle] is not None else "—"
+
+        cache = " (cache)" if r["cache"] else ""
+        debut = "fin de parole" if self.fin_parole else "tour final" if self.tour_final else "envoi"
+        return (f"Latence : fin de tour {s('fin_de_tour')} · cerveau : 1er mot {s('premier_mot')}, "
+                f"1re phrase {s('premiere_phrase')} · synthèse {s('synthese')}{cache} · "
+                f"lecture {s('lecture')} · total {s('total')} ({debut} → premier son)"
+                + (f" · {r['recherches']} recherche(s)" if r["recherches"] else ""))
 
 
 class GardeFouSilence:
@@ -350,6 +406,8 @@ class Conversation:
         self.tache_reconnexion: asyncio.Task | None = None
         self.garde_silence = GardeFouSilence(horloge=horloge)
         self.tache_garde: asyncio.Task | None = None
+        # La mesure de la dernière réponse, complétée quand le navigateur commence à la jouer.
+        self._mesure: MesureReponse | None = None
         self._verrou_mode = asyncio.Lock()
         self._verrou_envoi = asyncio.Lock()
         # Les lectures de la voix de Joi dans le navigateur : [début, fin ou None] (time.monotonic).
@@ -469,10 +527,25 @@ class Conversation:
         maintenant = time.monotonic()
         self._derniere_activite = maintenant
         if en_cours:
+            mesure = self._mesure
+            if mesure and mesure.mp3_envoye is not None and mesure.lecture is None:
+                mesure.lecture = maintenant
+                # La lecture peut commencer (phrase d'attente) avant la première phrase du cerveau :
+                # la mesure est notée à la fin de la réponse.
+                if mesure.reponse_finie:
+                    self._terminer_mesure()
             if not self._lectures or self._lectures[-1][1] is not None:
                 self._lectures.append([maintenant, None])
         elif self._lectures and self._lectures[-1][1] is None:
             self._lectures[-1][1] = maintenant
+
+    def _terminer_mesure(self) -> None:
+        """Note la mesure de la dernière réponse (journal technique et tableau de bord)."""
+        mesure, self._mesure = self._mesure, None
+        if mesure is None or mesure.envoi is None:
+            return
+        log.info(mesure.ligne())
+        monitoring.latences.append(mesure.resume())
 
     def _joi_parlait(self, debut: float, fin: float) -> bool:
         maintenant = time.monotonic()
@@ -779,7 +852,11 @@ class Conversation:
     async def repondre(self, texte: str, systeme: bool = False, tour: Tour | None = None) -> None:
         """La réponse de Joi à ce que la personne a dit (ou tapé). systeme : un message glissé par le
         serveur (un courriel reçu, une écoute apprise) ; Joi peut alors répondre [rien], qui n'est ni dit ni écrit au journal."""
+        mesure = None
         if not systeme:
+            if self._mesure:  # la réponse précédente n'a jamais été jouée : on la note quand même
+                self._terminer_mesure()
+            mesure = self._mesure = MesureReponse(tour)
             journal.noter("toi", texte)
             await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
@@ -796,12 +873,15 @@ class Conversation:
             if systeme and not a_parle and not dites:
                 await self.envoyer(type="etat", etat="reflechit")  # efface le sous-titre précédent
             await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
-            audio = await voix.synthetiser(phrase)
+            infos: dict = {}
+            audio = await voix.synthetiser(phrase, infos)
             if audio:
                 if not a_parle:
                     await self.envoyer(type="etat", etat="parle")
                     a_parle = True
                 await self.envoyer_audio(audio)
+                if mesure and mesure.mp3_envoye is None:
+                    mesure.synthese, mesure.mp3_envoye = infos, time.monotonic()
 
         async def attendre(phrases: list[str]) -> None:
             # Une seule phrase d'attente, et seulement si elle n'a encore rien dit.
@@ -812,6 +892,8 @@ class Conversation:
 
         try:
             async for morceau in self.cerveau.repondre(texte, systeme=systeme):
+                if mesure:
+                    mesure.envoi, mesure.premier_token = self.cerveau.envoi, self.cerveau.premier_token
                 if isinstance(morceau, RECHERCHE):
                     recherches += 1
                     log.info("Joi fouille sa mémoire (%.1f s) : %r",
@@ -830,6 +912,8 @@ class Conversation:
                     continue
                 if premiere_phrase is None:
                     premiere_phrase = time.perf_counter() - debut
+                    if mesure:
+                        mesure.premiere_phrase = time.monotonic()
                 dites.append(morceau)
                 await dire(morceau)
             termine = True
@@ -853,6 +937,12 @@ class Conversation:
         finally:
             journal.noter("joi", " ".join(dites), interrompu=not termine)
             self._derniere_activite = time.monotonic()
+            if mesure:
+                mesure.recherches = recherches
+                mesure.reponse_finie = True
+                # Sans son, ou déjà en lecture : rien de plus à attendre du navigateur.
+                if self._mesure is mesure and (mesure.mp3_envoye is None or mesure.lecture is not None):
+                    self._terminer_mesure()
 
     # ---------- Courriels reçus (compte de Joi) ----------
 
