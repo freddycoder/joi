@@ -163,12 +163,17 @@ def pertinence(texte_normalise: str, racines_: list[str]) -> int:
 
 
 def chercher(racines_: list[str], limite: int = 10, jours: int = 60,
-             dates: set[str] | None = None) -> list[dict]:
+             dates: set[str] | None = None, stats: dict | None = None) -> list[dict]:
     """Les entrées des derniers jours qui contiennent le plus de racines, les plus récentes d'abord.
-    dates : seulement ces journées (AAAA-MM-JJ), même plus anciennes."""
+    dates : seulement ces journées (AAAA-MM-JJ), même plus anciennes.
+    stats : reçoit le volume lu (« journal_jours », « journal_octets ») : tout est relu à chaque
+    recherche, et ce volume dira quand passer à un index."""
     if not racines_:
         return []
     fichiers = [f for f in _fichiers() if f.stem in dates] if dates else _fichiers()[-jours:]
+    if stats is not None:
+        stats["journal_jours"] = len(fichiers)
+        stats["journal_octets"] = sum(f.stat().st_size for f in fichiers)
     trouvees = []
     for fichier in fichiers:
         for entree in _lire(fichier):

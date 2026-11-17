@@ -17,6 +17,7 @@ import logging
 import re
 import shutil
 import subprocess
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -259,12 +260,16 @@ def _extrait(lignes: list[str], normalisees: list[str], poids: dict[str, float],
     return _couper("\n".join(lignes[j] for j in sorted(retenues)), taille)
 
 
-def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
+def souvenir(recherche: str, aujourdhui: date | None = None, stats: dict | None = None) -> str:
     """Cherche dans les fichiers de mémoire, puis dans le journal des conversations.
 
     Une journée nommée (« aujourd'hui », « hier », « 16 novembre ») donne d'abord son résumé complet
     (journees/AAAA-MM-JJ.md) : une recherche par mots-clés ne le retrouve pas, car « novembre » ou
-    « 2026 » se trouvent dans tous les résumés. Le reste de la recherche sert de mots-clés."""
+    « 2026 » se trouvent dans tous les résumés. Le reste de la recherche sert de mots-clés.
+
+    Tout est relu à chaque appel (aucun index) : c'est lent sur un gros journal, d'où l'appel dans
+    un fil à part (voir chercher_souvenir). stats reçoit le volume lu."""
+    stats = {} if stats is None else stats
     jours, reste = _dates_nommees(recherche, aujourdhui or date.today())
     resultats = []
 
@@ -291,9 +296,12 @@ def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
     for fichier in _fichiers_md():
         if fichier.resolve() in deja_montres:
             continue
-        lignes = fichier.read_text(encoding="utf-8").splitlines()
+        contenu = fichier.read_text(encoding="utf-8")
+        stats["memoire_octets"] = stats.get("memoire_octets", 0) + len(contenu.encode("utf-8"))
+        lignes = contenu.splitlines()
         normalisees = [journal.normaliser(l) for l in lignes]
         fichiers.append((fichier, lignes, normalisees, "\n".join(normalisees)))
+    stats["memoire_fichiers"] = len(fichiers)
     # Un mot présent dans un seul fichier compte pour 1, dans quatre fichiers pour 1/4.
     presences = {m: sum(m in texte for *_, texte in fichiers) for m in mots}
     poids = {m: 1 / n for m, n in presences.items() if n}
@@ -307,7 +315,7 @@ def souvenir(recherche: str, aujourdhui: date | None = None) -> str:
 
     # 3. Journal : les échanges mot pour mot (et ce qui a été entendu en mode écoute), seulement
     # des journées nommées s'il y en a.
-    entrees = journal.chercher(mots, limite=8, dates=set(jours) or None) if mots else []
+    entrees = journal.chercher(mots, limite=8, dates=set(jours) or None, stats=stats) if mots else []
 
     # Les fichiers et le journal se partagent l'extrait : un seul fichier ne le remplit plus.
     sections = len(retenus) + (1 if entrees else 0)
@@ -352,6 +360,25 @@ def _qui(entree: dict) -> str:
     return "toi" if entree.get("qui") == "toi" else "Joi"
 
 
+def chercher_souvenir(recherche: str) -> str:
+    """souvenir(), avec sa durée et le volume lu dans le journal technique : pour savoir quand la
+    relecture complète devient trop lente et qu'il faut un index (SQLite FTS5, par exemple)."""
+    debut = time.perf_counter()
+    stats: dict = {}
+    try:
+        return souvenir(recherche, stats=stats)
+    finally:
+        log.info(
+            "Recherche %r : %.0f ms, %d fichier(s) de mémoire (%d Ko), %d jour(s) de journal (%d Ko)",
+            recherche, (time.perf_counter() - debut) * 1000,
+            stats.get("memoire_fichiers", 0), stats.get("memoire_octets", 0) // 1024,
+            stats.get("journal_jours", 0), stats.get("journal_octets", 0) // 1024,
+        )
+
+
+# Le SDK Copilot appelle les handlers sur la boucle asyncio du serveur et attend leur résultat s'il
+# est awaitable (copilot/tools.py, wrapped_handler). Une recherche relit toute la mémoire et jusqu'à
+# 60 jours de journal : dans un fil à part, l'audio, le WebSocket et les annonces ne se figent pas.
 outil_se_souvenir = define_tool(
     "se_souvenir",
     description=(
@@ -362,7 +389,7 @@ outil_se_souvenir = define_tool(
         "une conversation avec toi. « [entendu, toi (voix reconnue)] » : la personne, reconnue à sa voix. "
         "« voix A » ou « voix inconnue » : quelqu'un d'autre, ou la personne si sa voix n'a pas été reconnue."
     ),
-    handler=lambda p, _: souvenir(p.recherche),
+    handler=lambda p, _: asyncio.to_thread(chercher_souvenir, p.recherche),
     params_type=ParametresSouvenir,
     skip_permission=True,
     idempotent=True,
@@ -437,10 +464,13 @@ def _nettoyer_dossiers_vides(dossier: Path) -> None:
 
 
 OUTILS_BIBLIOTHECAIRE = [
+    # La bibliothécaire travaille en fond, mais sur la même boucle que la conversation : ses lectures
+    # passent aussi par un fil à part. Les écritures, courtes, restent sur la boucle : deux d'entre
+    # elles ne peuvent pas se croiser sur un même fichier.
     define_tool("lister", description="Liste tous les fichiers de la mémoire.",
-                handler=lambda _: lister(), skip_permission=True, idempotent=True),
+                handler=lambda _: asyncio.to_thread(lister), skip_permission=True, idempotent=True),
     define_tool("lire", description="Lit un fichier de la mémoire.",
-                handler=lambda p, _: lire(p.chemin), params_type=ParametresChemin,
+                handler=lambda p, _: asyncio.to_thread(lire, p.chemin), params_type=ParametresChemin,
                 skip_permission=True, idempotent=True),
     define_tool("ecrire", description="Crée ou remplace entièrement un fichier .md de la mémoire.",
                 handler=lambda p, _: ecrire(p.chemin, p.contenu), params_type=ParametresEcrire,
