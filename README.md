@@ -110,6 +110,13 @@ lui donne le résumé complet de cette journée.
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
 Garde l'onglet ouvert et branche le portable.
 
+**Coupures.** Si la liaison avec le serveur tombe (Joi relancée, portable sorti de veille), la page se
+reconnecte seule, sans clic, et reprend l'écoute : l'indicateur rouge clignote et affiche « interrompu »
+tant que la liaison n'est pas revenue. Une nouvelle séance commence alors ; la précédente est gardée et
+transcrite comme les autres. Si le micro s'arrête (débranché, permission retirée), ou si plus aucun son
+n'arrive au serveur pendant 30 s, un message le dit à l'écran et dans le journal technique. En
+conversation, Joi rouvre aussi seule sa liaison avec AssemblyAI si elle tombe (au plus tard après 3 h).
+
 ### Reconnaissance des voix
 
 AssemblyAI sépare les voix (A, B, C…) segment par segment : le « A » de 9 h n'est pas forcément le « A »
