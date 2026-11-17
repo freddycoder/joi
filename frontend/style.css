@@ -101,6 +101,18 @@ body[data-mode="ecoute"] .etat { color: var(--discret); }
 }
 @keyframes pulsation { 50% { opacity: 0.25; } }
 
+/* Coupure pendant l'écoute (serveur injoignable, micro arrêté) : l'enregistrement est interrompu.
+   Un clignotement franc, différent de la pulsation normale, pour le voir de l'autre bout de l'atelier. */
+.enregistrement.interrompu { animation: clignotement 0.8s steps(1) infinite; text-transform: uppercase; }
+.enregistrement.interrompu .point { animation: none; width: 12px; height: 12px; }
+@keyframes clignotement { 50% { opacity: 0; } }
+
+.etat[data-etat="reconnexion"],
+body[data-mode="ecoute"] .etat[data-etat="reconnexion"] {
+  color: var(--erreur);
+  animation: pulsation 1.2s ease-in-out infinite;
+}
+
 body[data-mode="ecoute"] #sous-titres { opacity: 0.35; }
 
 #sous-titres {
