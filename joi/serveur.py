@@ -875,7 +875,6 @@ class Conversation:
         a_parle = False
         dites: list[str] = []  # les phrases données par le cerveau
         envoyees: list[str] = []  # celles vraiment parties vers le navigateur : ce que retient le journal
-        attentes: set[str] = set()  # la phrase d'attente (recherche, consultation), pas une réponse
         termine = False
         silence = False  # elle a répondu [rien] à un message système
         debut = time.perf_counter()
@@ -886,7 +885,7 @@ class Conversation:
         # La voix : chaque phrase est synthétisée dès que le cerveau la donne (SYNTHESES_EN_AVANCE à
         # la fois au plus), pendant que les précédentes partent vers le navigateur, toujours dans
         # l'ordre. Avant, la phrase suivante attendait la fin de la synthèse de la précédente.
-        a_envoyer: asyncio.Queue = asyncio.Queue()  # (phrase, tâche de synthèse), puis None
+        a_envoyer: asyncio.Queue = asyncio.Queue()  # (phrase, tâche de synthèse, attente ?), puis None
         syntheses: list[asyncio.Task] = []
         limite = asyncio.Semaphore(SYNTHESES_EN_AVANCE)
 
@@ -898,9 +897,11 @@ class Conversation:
         async def envoyer_dans_l_ordre() -> None:
             nonlocal a_parle
             while (suivante := await a_envoyer.get()) is not None:
-                phrase, synthese = suivante
+                phrase, synthese, attente = suivante
                 await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
-                if phrase not in attentes:  # « Laisse-moi me rappeler… » n'a jamais été journalisé
+                # La phrase d'attente (« Laisse-moi me rappeler… ») n'a jamais été journalisée. On la
+                # reconnaît à son marqueur, pas à son texte : le cerveau peut dire la même phrase.
+                if not attente:
                     envoyees.append(phrase)
                 try:
                     audio, infos = await synthese
@@ -918,23 +919,21 @@ class Conversation:
 
         envoi = asyncio.create_task(envoyer_dans_l_ordre())
 
-        async def dire(phrase: str) -> None:
+        async def dire(phrase: str, attente: bool = False) -> None:
             if systeme and not a_parle and not dites:
                 await self.envoyer(type="etat", etat="reflechit")  # efface le sous-titre précédent
             synthese = asyncio.create_task(synthetiser(phrase))
             # Une synthèse ratée après une interruption n'est jamais attendue : on lit son erreur.
             synthese.add_done_callback(lambda t: t.cancelled() or t.exception())
             syntheses.append(synthese)
-            a_envoyer.put_nowait((phrase, synthese))
+            a_envoyer.put_nowait((phrase, synthese, attente))
 
         async def attendre(phrases: list[str]) -> None:
             # Une seule phrase d'attente, et seulement si elle n'a encore rien dit.
             nonlocal attente_dite
             if not attente_dite and not dites and not systeme:
                 attente_dite = True
-                attente = random.choice(phrases)
-                attentes.add(attente)
-                await dire(attente)
+                await dire(random.choice(phrases), attente=True)
 
         try:
             async for morceau in self.cerveau.repondre(texte, systeme=systeme):

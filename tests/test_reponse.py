@@ -227,3 +227,31 @@ def test_journal_seulement_ce_qui_est_parti(monkeypatch):
     # « Deux. » a son sous-titre (elle attendait sa voix), « Trois. » n'est jamais parti.
     assert navigateur.sous_titres() == ["Une.", "Deux."]
     assert joi["texte"] == "Une. Deux." and joi["interrompu"] is True
+
+
+def test_phrase_d_attente_hors_du_journal_meme_si_le_cerveau_la_redit(fausse_voix, monkeypatch):
+    import json
+
+    from joi import cerveau, config
+
+    monkeypatch.setattr(serveur, "PHRASES_DE_RECHERCHE", ["Laisse-moi me rappeler…"])
+
+    class CerveauQuiCherche(FauxCerveau):
+        async def repondre(self, texte, systeme=False):
+            self.envoi = self.premier_token = time.monotonic()
+            yield cerveau.RECHERCHE("chat")
+            yield "Laisse-moi me rappeler…"  # la même phrase, dite par le cerveau cette fois
+            yield "Ton chat s'appelle Pixel."
+
+    async def scenario():
+        conversation, navigateur = _conversation([])
+        conversation.cerveau = CerveauQuiCherche([])
+        await conversation.repondre("Comment s'appelle mon chat ?")
+        return navigateur
+
+    navigateur = asyncio.run(scenario())
+    assert navigateur.sous_titres() == ["Laisse-moi me rappeler…"] * 2 + ["Ton chat s'appelle Pixel."]
+    entrees = [json.loads(l) for f in config.DOSSIER_JOURNAL.glob("*.jsonl")
+               for l in f.read_text(encoding="utf-8").splitlines()]
+    joi, = [e for e in entrees if e["qui"] == "joi"]
+    assert joi["texte"] == "Laisse-moi me rappeler… Ton chat s'appelle Pixel."
