@@ -116,6 +116,9 @@ DELAI_RATTRAPAGE = 300  # secondes
 # Vérification de la fin de journée (bilan des voix), en secondes.
 INTERVALLE_FIN_DE_JOURNEE = 15 * 60
 
+# Phrases d'une réponse synthétisées en même temps au plus (voir Conversation.repondre).
+SYNTHESES_EN_AVANCE = 3
+
 # Marge autour d'une lecture de la voix de Joi (latence du haut-parleur et du micro), en secondes.
 MARGE_LECTURE = 0.5
 
@@ -868,20 +871,46 @@ class Conversation:
         recherches = consultations = 0
         attente_dite = False
 
-        async def dire(phrase: str) -> None:
+        # La voix : chaque phrase est synthétisée dès que le cerveau la donne (SYNTHESES_EN_AVANCE à
+        # la fois au plus), pendant que les précédentes partent vers le navigateur, toujours dans
+        # l'ordre. Avant, la phrase suivante attendait la fin de la synthèse de la précédente.
+        a_envoyer: asyncio.Queue = asyncio.Queue()  # (phrase, tâche de synthèse), puis None
+        syntheses: list[asyncio.Task] = []
+        limite = asyncio.Semaphore(SYNTHESES_EN_AVANCE)
+
+        async def synthetiser(phrase: str) -> tuple[bytes, dict]:
+            async with limite:
+                infos: dict = {}
+                return await voix.synthetiser(phrase, infos), infos
+
+        async def envoyer_dans_l_ordre() -> None:
             nonlocal a_parle
+            while (suivante := await a_envoyer.get()) is not None:
+                phrase, synthese = suivante
+                await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
+                try:
+                    audio, infos = await synthese
+                except Exception as e:  # une phrase sans voix (le sous-titre reste) plutôt que tout perdre
+                    log.warning("Synthèse impossible : %s", e)
+                    continue
+                if audio:
+                    if not a_parle:
+                        await self.envoyer(type="etat", etat="parle")
+                        a_parle = True
+                    await self.envoyer_audio(audio)
+                    if mesure and mesure.mp3_envoye is None:
+                        mesure.synthese, mesure.mp3_envoye = infos, time.monotonic()
+
+        envoi = asyncio.create_task(envoyer_dans_l_ordre())
+
+        async def dire(phrase: str) -> None:
             if systeme and not a_parle and not dites:
                 await self.envoyer(type="etat", etat="reflechit")  # efface le sous-titre précédent
-            await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
-            infos: dict = {}
-            audio = await voix.synthetiser(phrase, infos)
-            if audio:
-                if not a_parle:
-                    await self.envoyer(type="etat", etat="parle")
-                    a_parle = True
-                await self.envoyer_audio(audio)
-                if mesure and mesure.mp3_envoye is None:
-                    mesure.synthese, mesure.mp3_envoye = infos, time.monotonic()
+            synthese = asyncio.create_task(synthetiser(phrase))
+            # Une synthèse ratée après une interruption n'est jamais attendue : on lit son erreur.
+            synthese.add_done_callback(lambda t: t.cancelled() or t.exception())
+            syntheses.append(synthese)
+            a_envoyer.put_nowait((phrase, synthese))
 
         async def attendre(phrases: list[str]) -> None:
             # Une seule phrase d'attente, et seulement si elle n'a encore rien dit.
@@ -916,6 +945,8 @@ class Conversation:
                         mesure.premiere_phrase = time.monotonic()
                 dites.append(morceau)
                 await dire(morceau)
+            a_envoyer.put_nowait(None)
+            await envoi  # toute la voix est partie
             termine = True
             if silence:
                 log.info("Message système : Joi a choisi de ne rien dire.")
@@ -935,6 +966,9 @@ class Conversation:
             await self.signaler_erreur(f"Oups, j'ai perdu le fil : {e}")
             await self.envoyer(type="etat", etat="ecoute")
         finally:
+            # Une interruption annule les synthèses en attente et ce qui restait à envoyer.
+            for tache in (envoi, *syntheses):
+                tache.cancel()
             journal.noter("joi", " ".join(dites), interrompu=not termine)
             self._derniere_activite = time.monotonic()
             if mesure:

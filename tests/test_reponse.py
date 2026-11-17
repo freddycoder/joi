@@ -127,3 +127,75 @@ def test_message_systeme_pas_mesure(fausse_voix):
 
     asyncio.run(scenario())
     assert not monitoring.latences
+
+
+# --- Synthèse en parallèle --------------------------------------------------------------------
+
+def test_syntheses_en_parallele_envoyees_dans_l_ordre(fausse_voix):
+    phrases = [(0, "Première phrase."), (0, "Vite, la deuxième."), (0, "Troisième."), (0, "Quatrième.")]
+
+    async def scenario():
+        conversation, navigateur = _conversation(phrases)
+        debut = time.monotonic()
+        await conversation.repondre("Vas-y.")
+        return navigateur, time.monotonic() - debut
+
+    navigateur, duree = asyncio.run(scenario())
+    attendu = [p for _, p in phrases]
+    assert navigateur.sous_titres() == attendu
+    assert navigateur.audio() == [p.encode() for p in attendu]
+    # Trois synthèses de 0,1 s : en série, 0,3 s ; en parallèle, à peine plus de 0,1 s.
+    assert duree < 0.25, duree
+    debuts = [t for _, t in fausse_voix]
+    assert max(debuts) - min(debuts) < 0.05  # toutes lancées dès l'arrivée de leur phrase
+    # Le sous-titre d'une phrase part juste avant sa voix.
+    envois = navigateur.envois
+    for phrase in attendu:
+        i = envois.index({"type": "reponse", "texte": phrase})
+        assert envois[i + 1] == phrase.encode() or envois[i + 1] == {"type": "etat", "etat": "parle"}
+    assert envois[-1] == {"type": "fin_reponse"}
+
+
+def test_interruption_annule_les_syntheses(fausse_voix, monkeypatch):
+    annulees: list[str] = []
+
+    async def synthese_lente(texte, infos=None):
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            annulees.append(texte)
+            raise
+        return b""
+
+    monkeypatch.setattr(voix, "synthetiser", synthese_lente)
+
+    async def scenario():
+        conversation, navigateur = _conversation([(0, "Une."), (0, "Deux.")])
+        conversation.tache_reponse = asyncio.create_task(conversation.repondre("Parle."))
+        await asyncio.sleep(0.1)
+        await conversation.interrompre()
+        return navigateur
+
+    navigateur = asyncio.run(scenario())
+    assert sorted(annulees) == ["Deux.", "Une."]
+    assert navigateur.audio() == []
+    assert {"type": "fin_reponse"} not in navigateur.envois
+
+
+def test_une_synthese_ratee_ne_perd_pas_la_reponse(monkeypatch):
+    async def synthese(texte, infos=None):
+        if texte == "Raté.":
+            raise RuntimeError("TTS indisponible")
+        return texte.encode()
+
+    monkeypatch.setattr(voix, "synthetiser", synthese)
+
+    async def scenario():
+        conversation, navigateur = _conversation([(0, "Raté."), (0, "Réussi.")])
+        await conversation.repondre("Essaie.")
+        return navigateur
+
+    navigateur = asyncio.run(scenario())
+    assert navigateur.sous_titres() == ["Raté.", "Réussi."]
+    assert navigateur.audio() == ["Réussi.".encode()]
+    assert navigateur.envois[-1] == {"type": "fin_reponse"}
