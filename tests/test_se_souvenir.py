@@ -76,6 +76,7 @@ def test_recherche_sur_un_gros_journal(caplog):
     assert "planche numéro 1234" in resultat.text_result_for_llm
     assert ticks >= 2, (ticks, duree)
     # La durée et le volume lu sont notés au journal technique.
-    ligne, = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Recherche ")]
+    ligne, = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Recherche dans la mémoire")]
     assert "20 jour(s) de journal" in ligne
     assert f"({taille // 1024} Ko)" in ligne
+    assert "vernis" not in ligne  # la recherche elle-même est déjà notée par le serveur

@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -296,7 +297,10 @@ def souvenir(recherche: str, aujourdhui: date | None = None, stats: dict | None 
     for fichier in _fichiers_md():
         if fichier.resolve() in deja_montres:
             continue
-        contenu = fichier.read_text(encoding="utf-8")
+        try:
+            contenu = fichier.read_text(encoding="utf-8")
+        except OSError:  # déplacé ou supprimé par la bibliothécaire pendant la recherche
+            continue
         stats["memoire_octets"] = stats.get("memoire_octets", 0) + len(contenu.encode("utf-8"))
         lignes = contenu.splitlines()
         normalisees = [journal.normaliser(l) for l in lignes]
@@ -368,9 +372,10 @@ def chercher_souvenir(recherche: str) -> str:
     try:
         return souvenir(recherche, stats=stats)
     finally:
+        # Sans le texte de la recherche : le serveur l'a déjà noté (« Joi fouille sa mémoire »).
         log.info(
-            "Recherche %r : %.0f ms, %d fichier(s) de mémoire (%d Ko), %d jour(s) de journal (%d Ko)",
-            recherche, (time.perf_counter() - debut) * 1000,
+            "Recherche dans la mémoire : %.0f ms, %d fichier(s) de mémoire (%d Ko), %d jour(s) de journal (%d Ko)",
+            (time.perf_counter() - debut) * 1000,
             stats.get("memoire_fichiers", 0), stats.get("memoire_octets", 0) // 1024,
             stats.get("journal_jours", 0), stats.get("journal_octets", 0) // 1024,
         )
@@ -379,6 +384,15 @@ def chercher_souvenir(recherche: str) -> str:
 # Le SDK Copilot appelle les handlers sur la boucle asyncio du serveur et attend leur résultat s'il
 # est awaitable (copilot/tools.py, wrapped_handler). Une recherche relit toute la mémoire et jusqu'à
 # 60 jours de journal : dans un fil à part, l'audio, le WebSocket et les annonces ne se figent pas.
+# Un seul fil, à elle : les lectures de la mémoire passent une à une, et une rafale de recherches
+# n'occupe pas les fils partagés (reconnaissance des voix, rechargement des manifestes…).
+_FIL_MEMOIRE = ThreadPoolExecutor(max_workers=1, thread_name_prefix="joi-memoire")
+
+
+def _dans_le_fil(fonction: Callable, *arguments) -> asyncio.Future:
+    return asyncio.get_running_loop().run_in_executor(_FIL_MEMOIRE, fonction, *arguments)
+
+
 outil_se_souvenir = define_tool(
     "se_souvenir",
     description=(
@@ -389,7 +403,7 @@ outil_se_souvenir = define_tool(
         "une conversation avec toi. « [entendu, toi (voix reconnue)] » : la personne, reconnue à sa voix. "
         "« voix A » ou « voix inconnue » : quelqu'un d'autre, ou la personne si sa voix n'a pas été reconnue."
     ),
-    handler=lambda p, _: asyncio.to_thread(chercher_souvenir, p.recherche),
+    handler=lambda p, _: _dans_le_fil(chercher_souvenir, p.recherche),
     params_type=ParametresSouvenir,
     skip_permission=True,
     idempotent=True,
@@ -429,6 +443,9 @@ def lire(chemin: str) -> str:
 def ecrire(chemin: str, contenu: str) -> str:
     fichier = _chemin_md(chemin)
     fichier.parent.mkdir(parents=True, exist_ok=True)
+    # Pas d'écriture atomique (fichier temporaire + os.replace) : sous Windows, le remplacement échoue
+    # si la recherche (dans son fil) a le fichier ouvert. Au pire, une recherche lit une fois un
+    # fichier à moitié écrit ; le fichier lui-même n'est jamais abîmé.
     fichier.write_text(contenu.rstrip() + "\n", encoding="utf-8")
     return f"{chemin} enregistré."
 
@@ -465,12 +482,12 @@ def _nettoyer_dossiers_vides(dossier: Path) -> None:
 
 OUTILS_BIBLIOTHECAIRE = [
     # La bibliothécaire travaille en fond, mais sur la même boucle que la conversation : ses lectures
-    # passent aussi par un fil à part. Les écritures, courtes, restent sur la boucle : deux d'entre
-    # elles ne peuvent pas se croiser sur un même fichier.
+    # passent aussi par le fil de la mémoire. Les écritures, courtes, restent sur la boucle : deux
+    # d'entre elles ne peuvent pas se croiser.
     define_tool("lister", description="Liste tous les fichiers de la mémoire.",
-                handler=lambda _: asyncio.to_thread(lister), skip_permission=True, idempotent=True),
+                handler=lambda _: _dans_le_fil(lister), skip_permission=True, idempotent=True),
     define_tool("lire", description="Lit un fichier de la mémoire.",
-                handler=lambda p, _: asyncio.to_thread(lire, p.chemin), params_type=ParametresChemin,
+                handler=lambda p, _: _dans_le_fil(lire, p.chemin), params_type=ParametresChemin,
                 skip_permission=True, idempotent=True),
     define_tool("ecrire", description="Crée ou remplace entièrement un fichier .md de la mémoire.",
                 handler=lambda p, _: ecrire(p.chemin, p.contenu), params_type=ParametresEcrire,
