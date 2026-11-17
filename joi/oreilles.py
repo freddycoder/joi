@@ -150,6 +150,13 @@ class Oreilles:
             # « Lysdor » devient « list d'or »...). Voir JOI_MOTS_CLES dans .env.
             "keyterms_prompt": json.dumps(config.MOTS_CLES),
         }
+        # La fin de tour, seulement si elle est réglée dans .env (sinon, les valeurs d'AssemblyAI).
+        if config.ASSEMBLYAI_FIN_TOUR_MODE:
+            parametres["mode"] = config.ASSEMBLYAI_FIN_TOUR_MODE
+        if config.ASSEMBLYAI_SILENCE_MIN_MS is not None:
+            parametres["min_turn_silence"] = config.ASSEMBLYAI_SILENCE_MIN_MS
+        if config.ASSEMBLYAI_SILENCE_MAX_MS is not None:
+            parametres["max_turn_silence"] = config.ASSEMBLYAI_SILENCE_MAX_MS
         url = f"{URL_STREAMING}?{urlencode(parametres)}"
         # La clé passe dans l'en-tête Authorization (sans « Bearer »), jamais dans l'URL.
         try:

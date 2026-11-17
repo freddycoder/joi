@@ -76,6 +76,7 @@ def parametres() -> list[dict]:
             ("Clé AssemblyAI", "présente" if config.ASSEMBLYAI_API_KEY else "MANQUANTE"),
             ("Modèle temps réel", config.ASSEMBLYAI_MODELE),
             ("Mots-clés", ", ".join(config.MOTS_CLES)),
+            ("Fin de tour", _fin_de_tour()),
         ],
         "Cerveau": [("Modèle Copilot", config.JOI_MODELE or "automatique")],
         "Mode écoute": [
@@ -119,6 +120,15 @@ def _compte() -> list[tuple[str, str]]:
         ("Fuseau", reglages.NOM_FUSEAU),
         ("Application Entra", "présente" if reglages.MS_CLIENT_ID else "MANQUANTE"),
     ]
+
+
+def _fin_de_tour() -> str:
+    morceaux = [config.ASSEMBLYAI_FIN_TOUR_MODE or "mode d'AssemblyAI"]
+    if config.ASSEMBLYAI_SILENCE_MIN_MS is not None:
+        morceaux.append(f"silence min {config.ASSEMBLYAI_SILENCE_MIN_MS} ms")
+    if config.ASSEMBLYAI_SILENCE_MAX_MS is not None:
+        morceaux.append(f"max {config.ASSEMBLYAI_SILENCE_MAX_MS} ms")
+    return " · ".join(morceaux)
 
 
 def _ta_voix() -> str:

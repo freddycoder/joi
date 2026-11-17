@@ -409,3 +409,31 @@ def test_tour_final_ne_bloque_pas_la_reception(monkeypatch):
     # deuxième, interrompue avant d'avoir commencé, ne part jamais.
     assert evenements[:4] == ["réponse Première question.", "abort début", "abort fin", "réponse Troisième question."]
     assert "réponse Deuxième question." not in evenements
+
+
+# --- Réglages de la fin de tour ---------------------------------------------------------------
+
+def test_fin_de_tour_envoyee_seulement_si_reglee(monkeypatch):
+    from joi import config
+
+    chemins: list[str] = []
+
+    async def noter_chemin(ws, serveur_):
+        chemins.append(ws.request.path)
+        await reste_ouvert(ws, serveur_)
+
+    async def ouvrir_et_fermer():
+        async with FauxServeur(noter_chemin):
+            o = Rappels().oreilles()
+            await o.ouvrir()
+            await o.fermer()
+
+    asyncio.run(ouvrir_et_fermer())
+    monkeypatch.setattr(config, "ASSEMBLYAI_FIN_TOUR_MODE", "min_latency")
+    monkeypatch.setattr(config, "ASSEMBLYAI_SILENCE_MIN_MS", 160)
+    monkeypatch.setattr(config, "ASSEMBLYAI_SILENCE_MAX_MS", 900)
+    asyncio.run(ouvrir_et_fermer())
+
+    sans, avec = chemins
+    assert "mode=" not in sans and "turn_silence" not in sans  # comme avant : les valeurs d'AssemblyAI
+    assert "mode=min_latency" in avec and "min_turn_silence=160" in avec and "max_turn_silence=900" in avec

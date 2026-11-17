@@ -13,6 +13,25 @@ ASSEMBLYAI_MODELE = os.getenv("ASSEMBLYAI_MODELE", "universal-3-6-pro").strip()
 # Noms propres et mots inventés que la reconnaissance vocale doit privilégier, séparés par des virgules.
 MOTS_CLES = ["Joi"] + [m.strip() for m in os.getenv("JOI_MOTS_CLES", "").split(",") if m.strip()]
 
+
+def _entier_ou_rien(nom: str) -> int | None:
+    try:
+        return int(os.getenv(nom, "").strip())
+    except ValueError:
+        return None
+
+
+# Fin de tour d'AssemblyAI (quand décide-t-elle que tu as fini de parler ?). Vide : la valeur
+# d'AssemblyAI, comme avant. Paramètres de Universal-3 Pro Streaming vérifiés le 2026-11-17 :
+#   mode : min_latency, balanced (celui d'AssemblyAI par défaut) ou max_accuracy ;
+#   min_turn_silence (ms, 50 à 10 000) : silence minimal avant de pouvoir finir un tour ;
+#   max_turn_silence (ms) : silence qui finit le tour quoi qu'il arrive (640, 1280 ou 2560 selon le mode).
+ASSEMBLYAI_FIN_TOUR_MODE = os.getenv("JOI_FIN_TOUR_MODE", "").strip().lower()
+if ASSEMBLYAI_FIN_TOUR_MODE not in ("", "min_latency", "balanced", "max_accuracy"):
+    ASSEMBLYAI_FIN_TOUR_MODE = ""
+ASSEMBLYAI_SILENCE_MIN_MS = _entier_ou_rien("JOI_FIN_TOUR_SILENCE_MIN_MS")
+ASSEMBLYAI_SILENCE_MAX_MS = _entier_ou_rien("JOI_FIN_TOUR_SILENCE_MAX_MS")
+
 JOI_VOIX = os.getenv("JOI_VOIX", "fr-CA-SylvieNeural").strip()
 JOI_DEBIT = os.getenv("JOI_DEBIT", "+0%").strip()
 # Moteur de synthèse vocale : « edge » (edge-tts, par défaut) ou « assemblyai ».
