@@ -66,7 +66,12 @@ JOI_COMPTE = _compte if _compte in COMPTES_PRIS_EN_CHARGE else None
 # et l'écrit au journal technique (voir le démarrage de joi/serveur.py).
 JOI_COMPTE_REFUSE = _compte if _compte and not JOI_COMPTE else None
 
-DOSSIER_DONNEES = RACINE / "donnees"
+# Le dossier des données (mémoire, journal, enregistrements, empreintes, logs). JOI_DONNEES sert aux
+# tests (tests/conftest.py), qui ne doivent jamais toucher la vraie mémoire. Plusieurs modules figent
+# leurs chemins à l'import (memoire.RACINE, journal.FICHIER_CONSOLIDATION…) : la variable doit donc
+# être définie avant le premier import de joi.
+_donnees = os.getenv("JOI_DONNEES", "").strip()
+DOSSIER_DONNEES = Path(_donnees).resolve() if _donnees else RACINE / "donnees"
 DOSSIER_VOIX = DOSSIER_DONNEES / "voix"
 DOSSIER_JOURNAL = DOSSIER_DONNEES / "journal"
 DOSSIER_MEMOIRE = DOSSIER_DONNEES / "memoire"

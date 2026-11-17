@@ -284,17 +284,14 @@ Chaque rangement est enregistré dans un dépôt git **local** (sans remote) :
 Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime `donnees/memoire/`,
 `donnees/journal/` et `donnees/enregistrements/`.
 
-## Prochaines étapes envisagées
 
-P1
-- Aucune pour l'instant
+## Tests
 
-P2
-- MCP pour icloud
-- Remettre JOI_GARDER_AUDIO=non et effacer les MP3 de test et le cache du rejeu.
+```
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest
+```
 
-P3
-- Compétences sous forme d'outils dans le serveur MCP du compte : nouvelles, tutorat
-- Nommer une voix avec l'accord de la personne (« Joi, voici Denis, il est d'accord »)
-- Avatar 2D/3D avec synchronisation des lèvres
-- Application de bureau (Tauri)
+Les tests n'utilisent **jamais** `donnees/` : `tests/conftest.py` fait pointer `JOI_DONNEES` vers un
+dossier temporaire avant d'importer Joi, et arrête tout si ce n'est pas le cas. Ils ne font aucun appel
+réseau (pas de clé AssemblyAI, pas de compte) et ne chargent ni PyTorch ni Vosk : quelques secondes.
