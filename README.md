@@ -41,13 +41,22 @@ Mode écoute :  micro ──► enregistreur.py (MP3 local) ──► transcript
 | `joi/transcription.py` | Mode écoute : transcription différée, avec séparation des voix par AssemblyAI |
 | `joi/empreintes.py` | Mode écoute : reconnaissance des voix sur toute la journée (empreintes vocales locales) |
 | `joi/commande_vocale.py` | « Joi, écoute seulement » et « Joi, reviens » |
-| `joi/serveur.py` | Relie le tout, gère les modes et les interruptions |
+| `joi/serveur.py` | Relie le tout, gère les modes, les interruptions et les coupures |
+| `joi/banc.py` | Banc d'essai des modèles Copilot (temps jusqu'à la première phrase) |
 | `joi/compte/` | Optionnel : le courriel, l'agenda et les tâches de Joi, par un serveur MCP (voir « Le compte de Joi ») |
 | `frontend/` | Interface : hologramme, micro, lecture audio, sous-titres |
 
 **Diagnostics.** `Alt+P` ouvre les paramètres en vigueur (panneau de gauche), `Alt+M` le monitoring
 (panneau de droite : signal du micro et de la voix, temps de réponse, voix, écoute, transcription, mémoire,
 derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'hologramme reste au centre.
+
+**Latence.** Chaque réponse ajoute une ligne « Latence : » au journal technique, et le bloc « Latence » du
+monitoring montre la dernière réponse et la médiane : fin de tour (AssemblyAI décide que tu as fini de
+parler), cerveau (premier mot, première phrase), synthèse de la voix, début de la lecture, et le total de
+la fin de ta phrase au premier son. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
+`JOI_FIN_TOUR_SILENCE_MIN_MS` / `_MAX_MS` dans `.env` (vides : les valeurs d'AssemblyAI). Pour comparer
+les modèles Copilot, sans micro : `.venv\Scripts\python -m joi.banc MODELE1 MODELE2` (chaque phrase
+consomme une requête Copilot ; `--lister`, `--phrases N`). Il ne change pas `JOI_MODELE`.
 
 On peut interrompre Joi en lui parlant par-dessus : elle se tait et écoute.
 On peut aussi lui écrire au clavier (champ en bas de l'écran).

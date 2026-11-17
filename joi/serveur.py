@@ -74,7 +74,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import commande_vocale, config, empreintes, enregistreur, journal, memoire, monitoring, transcription, voix
-from .cerveau import CONSULTATION, RECHERCHE, Cerveau
+from .cerveau import CONSULTATION, RECHERCHE, Cerveau, arreter_client_partage, client_partage
 from .enregistreur import OCTETS_PAR_SECONDE, Enregistreur
 from .oreilles import Oreilles, Tour
 
@@ -205,10 +205,19 @@ async def _prechauffer_voix() -> None:
             return
 
 
+async def _prechauffer_cerveau() -> None:
+    """Démarre le client Copilot partagé avant le premier réveil : il ne reste qu'une session à créer."""
+    try:
+        await client_partage()
+    except Exception as e:
+        log.warning("Client Copilot pas encore démarré (il le sera au réveil) : %s", e)
+
+
 @asynccontextmanager
 async def cycle_de_vie(_app: FastAPI):
     monitoring.installer()
     memoire.initialiser()
+    _en_fond(_prechauffer_cerveau())
     _en_fond(_rattraper_plus_tard())
     _en_fond(_prechauffer_voix())
     # Télécharge le modèle de « Joi, reviens » dès maintenant (une seule fois), pour qu'il soit prêt
@@ -223,6 +232,7 @@ async def cycle_de_vie(_app: FastAPI):
     if config.JOI_COMPTE:
         _en_fond(_veiller_courriels())
     yield
+    await arreter_client_partage()
 
 
 app = FastAPI(title="Joi", lifespan=cycle_de_vie)

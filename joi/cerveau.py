@@ -1,7 +1,11 @@
 """Le cerveau de Joi : une session GitHub Copilot (via le Copilot SDK) qui porte sa personnalité.
 
 La réponse est diffusée en continu (streaming) et découpée en phrases, pour que la voix
-puisse commencer à parler avant que la réponse complète soit écrite.
+puisse commencer à parler avant que la réponse complète soit écrite. La première phrase peut même
+être coupée plus tôt, à une virgule (couper_premiere).
+
+Toutes les conversations partagent un client Copilot (un processus de la CLI), démarré avec le
+serveur : chaque réveil n'y crée qu'une session. La bibliothécaire (joi/memoire.py) garde le sien.
 """
 
 import asyncio
@@ -22,6 +26,13 @@ log = logging.getLogger("joi.cerveau")
 FIN_DE_PHRASE = re.compile(r"(?<=[.!?…])\s+|\n+")
 FIN_DE_REPONSE = object()
 
+# Pour la première phrase seulement : si aucune fin de phrase n'est arrivée après ce nombre de mots,
+# on coupe à une virgule, un point-virgule ou un deux-points suivi d'une espace. La voix commence
+# plus tôt ; la suite se recolle à l'oreille. En français, la virgule décimale (« 3,5 ») n'est pas
+# suivie d'une espace : elle n'est jamais coupée.
+MOTS_AVANT_COUPURE = 8
+COUPURE_DOUCE = re.compile(r"(?<=[,;:])\s+")
+
 
 class _Recherche(str):
     """Marqueur produit par repondre() quand Joi fouille sa mémoire (le texte = la recherche)."""
@@ -40,6 +51,56 @@ def couper_phrases(tampon: str) -> tuple[list[str], str]:
     morceaux = FIN_DE_PHRASE.split(tampon)
     completes = [m.strip() for m in morceaux[:-1] if m.strip()]
     return completes, morceaux[-1]
+
+
+def couper_premiere(tampon: str, mots_min: int = MOTS_AVANT_COUPURE) -> tuple[str | None, str]:
+    """La première phrase, coupée plus tôt : (le morceau jusqu'à la dernière virgule, le reste), ou
+    (None, tampon) s'il n'y a pas encore assez de mots ou pas de virgule suivie d'une espace."""
+    if len(tampon.split()) < mots_min:
+        return None, tampon
+    coupures = list(COUPURE_DOUCE.finditer(tampon))
+    if not coupures:
+        return None, tampon
+    morceau = tampon[:coupures[-1].start()].strip()
+    if not morceau:
+        return None, tampon
+    return morceau, tampon[coupures[-1].end():]
+
+
+# --- Le client Copilot partagé ------------------------------------------------------------------
+
+_client_partage: CopilotClient | None = None
+_verrou_client: asyncio.Lock | None = None
+
+
+async def client_partage(neuf: bool = False) -> CopilotClient:
+    """Le client Copilot de toutes les conversations, démarré au premier appel (le serveur l'appelle
+    dès son lancement). neuf : le remplacer (il ne répond plus) ; ses sessions sont alors perdues."""
+    global _client_partage, _verrou_client
+    if _verrou_client is None:
+        _verrou_client = asyncio.Lock()
+    async with _verrou_client:
+        if neuf and _client_partage is not None:
+            ancien, _client_partage = _client_partage, None
+            try:
+                await ancien.stop()
+            except Exception:
+                pass
+        if _client_partage is None:
+            client = CopilotClient()
+            await client.start()
+            _client_partage = client
+        return _client_partage
+
+
+async def arreter_client_partage() -> None:
+    global _client_partage
+    client, _client_partage = _client_partage, None
+    if client:
+        try:
+            await client.stop()
+        except Exception as e:
+            log.warning("Arrêt du client Copilot : %s", e)
 
 
 def refuser_permission(requete, invocation):
@@ -69,7 +130,6 @@ class Cerveau:
 
     async def demarrer(self) -> None:
         self._boucle = asyncio.get_running_loop()
-        self._client = CopilotClient()
         consignes = config.FICHIER_PERSONNALITE.read_text(encoding="utf-8") + memoire.contexte_reveil()
         # Joi n'a qu'un outil, se_souvenir : pas de fichiers, pas de terminal.
         outils_permis = [memoire.outil_se_souvenir.name]
@@ -81,31 +141,40 @@ class Cerveau:
             from .compte.integration import Integration
 
             self._compte = Integration(repli=refuser_permission)
-            _, contexte = await asyncio.gather(self._client.start(), self._compte.contexte_reveil())
+            self._client, contexte = await asyncio.gather(client_partage(), self._compte.contexte_reveil())
             consignes += self._compte.consignes() + contexte
             outils_permis += self._compte.outils_permis()
             permission = self._compte.permission
             options["mcp_servers"] = self._compte.serveurs_mcp()
         else:
-            await self._client.start()
-        self._session = await self._client.create_session(
-            tools=[memoire.outil_se_souvenir],
-            available_tools=outils_permis,
-            on_permission_request=permission,
-            system_message={"mode": "replace", "content": consignes},
-            model=self.modele,
-            streaming=True,
-            skip_custom_instructions=True,
-            working_directory=str(config.DOSSIER_DONNEES),
-            **options,
-        )
+            self._client = await client_partage()
+
+        def nouvelle_session(client: CopilotClient):
+            return client.create_session(
+                tools=[memoire.outil_se_souvenir],
+                available_tools=outils_permis,
+                on_permission_request=permission,
+                system_message={"mode": "replace", "content": consignes},
+                model=self.modele,
+                streaming=True,
+                skip_custom_instructions=True,
+                working_directory=str(config.DOSSIER_DONNEES),
+                **options,
+            )
+
+        try:
+            self._session = await nouvelle_session(self._client)
+        except Exception as e:
+            # Le client partagé ne répond plus (processus de la CLI arrêté ?) : on en démarre un neuf.
+            log.warning("Session Copilot impossible sur le client partagé (%s) : nouveau client.", e)
+            self._client = await client_partage(neuf=True)
+            self._session = await nouvelle_session(self._client)
         self._session.on(self._sur_evenement)
 
     async def arreter(self) -> None:
+        """Ferme la session ; le client partagé reste ouvert pour la conversation suivante."""
         if self._session:
             await self._session.disconnect()
-        if self._client:
-            await self._client.stop()
 
     def _sur_evenement(self, evenement) -> None:
         # Le SDK peut appeler ce gestionnaire depuis un autre fil : on repasse par la boucle asyncio.
@@ -153,6 +222,7 @@ class Cerveau:
                 self._compte.noter_tour(texte)
             await self._session.send(texte)
         tampon = ""
+        premiere = True  # rien n'est encore sorti : la première phrase peut être coupée plus tôt
         try:
             while True:
                 morceau = await asyncio.wait_for(self._file.get(), timeout=120)
@@ -167,7 +237,11 @@ class Cerveau:
                     self.premier_token = time.monotonic()
                 tampon += morceau
                 phrases, tampon = couper_phrases(tampon)
+                if premiere and not phrases:
+                    debut, tampon = couper_premiere(tampon)
+                    phrases = [debut] if debut else []
                 for phrase in phrases:
+                    premiere = False
                     yield phrase
             if tampon.strip():
                 yield tampon.strip()
