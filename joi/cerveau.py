@@ -166,7 +166,10 @@ class Cerveau:
             self._session = await nouvelle_session(self._client)
         except Exception as e:
             # Le client partagé ne répond plus (processus de la CLI arrêté ?) : on en démarre un neuf.
-            log.warning("Session Copilot impossible sur le client partagé (%s) : nouveau client.", e)
+            # Seulement le type de l'erreur : son message pourrait reprendre la requête, donc les
+            # consignes (mémoire, courriels), et le journal technique s'affiche au tableau de bord.
+            log.warning("Session Copilot impossible sur le client partagé (%s) : nouveau client.",
+                        type(e).__name__)
             self._client = await client_partage(neuf=True)
             self._session = await nouvelle_session(self._client)
         self._session.on(self._sur_evenement)
