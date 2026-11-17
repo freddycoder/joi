@@ -196,3 +196,30 @@ mémoire. **Mesurer avant de changer**, et donner les chiffres avant et après d
   remaniements à faire plus tard, une fois les tests en place.
 - L'index SQLite FTS5 de la mémoire et du journal (voir partie 2).
 - iCloud (voir `plan-compte-joi.md`).
+
+---
+
+## État au 2026-11-17 (fin de la session de code)
+
+Les quatre parties sont codées sur la branche `ameliorations` (une PR), avec 156 tests
+(`.venv\Scripts\python -m pytest`, quelques secondes, jamais `donnees/`).
+
+Vérifié au début :
+- AssemblyAI (Universal-3 Pro Streaming) : la fin de tour se règle par `mode` (min_latency, balanced,
+  max_accuracy), `min_turn_silence` et `max_turn_silence` ; `end_of_turn_confidence_threshold` ne
+  s'applique pas à ce modèle. Une session dure 3 h au plus (fermeture 3008) ; l'inactivité (3006)
+  n'arrive que si `inactivity_timeout` est réglé (il ne l'est pas).
+- Copilot SDK 1.0.31 : un handler qui renvoie un awaitable est attendu ; un client porte plusieurs
+  sessions ; `disconnect()` arrête le serveur MCP de la session ; `list_models()` renvoie une liste vide.
+
+Mesures (avant → après) :
+- `se_souvenir` sur 5 Mo de journal : 0,8 s de boucle figée → 0 (fil dédié).
+- Synthèse (edge-tts, réponses de 4 phrases) : toute la voix prête en 3,9 s → 2,0 s.
+- Cerveau (banc, 8 phrases) : écart premier mot → première phrase de 0,25 s (jusqu'à 0,7 s) → 0,1 s au plus.
+- Réveil : client 0,14 s + session 0,2 s → session seule. Les 4 à 6 s du journal viennent du compte.
+
+Restent à l'utilisateur (voir « Ce que l'utilisateur devra vérifier lui-même ») : la journée réelle
+avec coupure, la ligne « Latence » en conversation, le banc des modèles, la fin de tour.
+
+Pistes notées, non codées : le contexte du compte au réveil (appels Graph en parallèle, ou préparé
+d'avance) ; relance automatique du serveur par `reveiller_joi.bat` (à décider).
