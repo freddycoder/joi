@@ -199,3 +199,31 @@ def test_une_synthese_ratee_ne_perd_pas_la_reponse(monkeypatch):
     assert navigateur.sous_titres() == ["Raté.", "Réussi."]
     assert navigateur.audio() == ["Réussi.".encode()]
     assert navigateur.envois[-1] == {"type": "fin_reponse"}
+
+
+def test_journal_seulement_ce_qui_est_parti(monkeypatch):
+    """Interrompue pendant la synthèse, Joi ne journalise pas les phrases jamais montrées ni dites."""
+    import json
+
+    from joi import config
+
+    async def synthese(texte, infos=None):
+        await asyncio.sleep(0 if texte == "Une." else 5)
+        return texte.encode()
+
+    monkeypatch.setattr(voix, "synthetiser", synthese)
+
+    async def scenario():
+        conversation, navigateur = _conversation([(0, "Une."), (0, "Deux."), (0, "Trois.")])
+        conversation.tache_reponse = asyncio.create_task(conversation.repondre("Parle."))
+        await asyncio.sleep(0.2)
+        await conversation.interrompre()
+        return navigateur
+
+    navigateur = asyncio.run(scenario())
+    entrees = [json.loads(l) for f in config.DOSSIER_JOURNAL.glob("*.jsonl")
+               for l in f.read_text(encoding="utf-8").splitlines()]
+    joi, = [e for e in entrees if e["qui"] == "joi"]
+    # « Deux. » a son sous-titre (elle attendait sa voix), « Trois. » n'est jamais parti.
+    assert navigateur.sous_titres() == ["Une.", "Deux."]
+    assert joi["texte"] == "Une. Deux." and joi["interrompu"] is True

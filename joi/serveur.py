@@ -873,7 +873,9 @@ class Conversation:
             journal.noter("toi", texte)
             await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
-        dites: list[str] = []
+        dites: list[str] = []  # les phrases données par le cerveau
+        envoyees: list[str] = []  # celles vraiment parties vers le navigateur : ce que retient le journal
+        attentes: set[str] = set()  # la phrase d'attente (recherche, consultation), pas une réponse
         termine = False
         silence = False  # elle a répondu [rien] à un message système
         debut = time.perf_counter()
@@ -898,10 +900,13 @@ class Conversation:
             while (suivante := await a_envoyer.get()) is not None:
                 phrase, synthese = suivante
                 await self.envoyer(type="reponse", texte=voix.nettoyer(phrase))
+                if phrase not in attentes:  # « Laisse-moi me rappeler… » n'a jamais été journalisé
+                    envoyees.append(phrase)
                 try:
                     audio, infos = await synthese
                 except Exception as e:  # une phrase sans voix (le sous-titre reste) plutôt que tout perdre
-                    log.warning("Synthèse impossible : %s", e)
+                    # Le type seulement : le message peut reprendre la réponse du fournisseur de voix.
+                    log.warning("Synthèse impossible : %s", type(e).__name__)
                     continue
                 if audio:
                     if not a_parle:
@@ -927,7 +932,9 @@ class Conversation:
             nonlocal attente_dite
             if not attente_dite and not dites and not systeme:
                 attente_dite = True
-                await dire(random.choice(phrases))
+                attente = random.choice(phrases)
+                attentes.add(attente)
+                await dire(attente)
 
         try:
             async for morceau in self.cerveau.repondre(texte, systeme=systeme):
@@ -979,7 +986,9 @@ class Conversation:
             # Une interruption annule les synthèses en attente et ce qui restait à envoyer.
             for tache in (envoi, *syntheses):
                 tache.cancel()
-            journal.noter("joi", " ".join(dites), interrompu=not termine)
+            # Seulement ce qui est parti : après une interruption, les phrases encore en synthèse n'ont
+            # été ni dites ni montrées, et la mémoire (consolidée depuis le journal) ne doit pas le croire.
+            journal.noter("joi", " ".join(envoyees), interrompu=not termine)
             self._derniere_activite = time.monotonic()
             if mesure:
                 mesure.recherches = recherches
