@@ -109,3 +109,150 @@ def test_cerveau_coupe_seulement_la_premiere_phrase():
         "c'est de poncer d'abord.",
         "Ensuite, tu passes une couche de teinture, puis tu attends, et tu vernis.",
     ]
+
+
+# --- voix.nettoyer : les puces ne se lisent pas ------------------------------------------------
+
+@pytest.mark.parametrize("texte, attendu", [
+    ("Voici : - A - B", "Voici : A B"),
+    ("- un", "un"),
+    ("• deux", "deux"),
+    ("Trois choses.– D'abord ça", "Trois choses. D'abord ça"),
+    ("Ligne\n- un\n- deux", "Ligne un deux"),
+])
+def test_nettoyer_retire_les_puces(texte, attendu):
+    from joi import voix
+
+    assert voix.nettoyer(texte) == attendu
+
+
+@pytest.mark.parametrize("texte", ["Peut-être demain.", "Dis-moi ce que t'en penses.", "Il fait -5 dehors."])
+def test_nettoyer_garde_les_traits_d_union(texte):
+    from joi import voix
+
+    assert voix.nettoyer(texte) == texte
+
+
+# --- Plusieurs messages du modèle dans un même tour ---------------------------------------------
+
+class _Evenement:
+    """Un faux événement du SDK : type et data (avec les seuls champs lus par le cerveau)."""
+
+    def __init__(self, genre, **data):
+        from types import SimpleNamespace
+
+        self.type = genre
+        self.data = SimpleNamespace(**data)
+
+
+def test_deux_messages_du_modele_restent_deux_phrases(caplog):
+    """« Oui ? » puis « Parfait. Alors… » : deux messages du modèle, jamais « Oui ?Parfait »."""
+    import asyncio
+    import logging
+
+    from copilot.session_events import SessionEventType as T
+
+    evenements = [
+        _Evenement(T.ASSISTANT_MESSAGE_START, message_id="m1"),
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m1", delta_content="Oui ?"),
+        _Evenement(T.ASSISTANT_MESSAGE_START, message_id="m2"),
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m2", delta_content="Parfait. "),
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m2", delta_content="Alors on y va"),
+        _Evenement(T.SESSION_IDLE),
+    ]
+
+    class FausseSession:
+        def __init__(self, c):
+            self.c = c
+
+        async def send(self, texte, **_):
+            async def produire():
+                for e in evenements:
+                    await asyncio.sleep(0)
+                    self.c._traiter_evenement(e)
+            asyncio.get_running_loop().create_task(produire())
+
+    async def scenario():
+        c = cerveau.Cerveau()
+        c._session = FausseSession(c)
+        return [m async for m in c.repondre("Tu m'entends ?")]
+
+    with caplog.at_level(logging.INFO, logger="joi.cerveau"):
+        phrases = asyncio.run(scenario())
+    assert phrases == ["Oui ?", "Parfait.", "Alors on y va"]
+    assert any("2 messages" in r.getMessage() for r in caplog.records)
+
+
+def test_un_seul_message_sans_separateur():
+    import asyncio
+
+    from copilot.session_events import SessionEventType as T
+
+    evenements = [
+        _Evenement(T.ASSISTANT_MESSAGE_START, message_id="m1"),
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m1", delta_content="Bonjour, "),
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m1", delta_content="toi."),
+        _Evenement(T.SESSION_IDLE),
+    ]
+
+    class FausseSession:
+        def __init__(self, c):
+            self.c = c
+
+        async def send(self, texte, **_):
+            async def produire():
+                for e in evenements:
+                    await asyncio.sleep(0)
+                    self.c._traiter_evenement(e)
+            asyncio.get_running_loop().create_task(produire())
+
+    async def scenario():
+        c = cerveau.Cerveau()
+        c._session = FausseSession(c)
+        return [m async for m in c.repondre("Salut.")]
+
+    assert asyncio.run(scenario()) == ["Bonjour, toi."]
+
+
+def test_nettoyer_puce_point_sans_espace():
+    from joi import voix
+
+    assert voix.nettoyer("Voici :\n•un\n•deux") == "Voici : un deux"
+
+
+def test_texte_avant_un_outil_dit_avant_la_phrase_d_attente():
+    """« Je regarde. » (sans espace, donc encore en tampon) sort avant le marqueur de recherche."""
+    import asyncio
+
+    from copilot.session_events import SessionEventType as T
+
+    from joi import memoire
+
+    evenements = [
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m1", delta_content="Je regarde."),
+        _Evenement(T.TOOL_EXECUTION_START, tool_name=memoire.outil_se_souvenir.name,
+                   arguments={"recherche": "chat"}),
+        _Evenement(T.ASSISTANT_MESSAGE_DELTA, message_id="m2", delta_content="Il s'appelle Pixel."),
+        _Evenement(T.SESSION_IDLE),
+    ]
+
+    class FausseSession:
+        def __init__(self, c):
+            self.c = c
+
+        async def send(self, texte, **_):
+            async def produire():
+                for e in evenements:
+                    await asyncio.sleep(0)
+                    self.c._traiter_evenement(e)
+            asyncio.get_running_loop().create_task(produire())
+
+    async def scenario():
+        c = cerveau.Cerveau()
+        c._session = FausseSession(c)
+        return [m async for m in c.repondre("Mon chat ?")]
+
+    sortie = asyncio.run(scenario())
+    assert sortie[0] == "Je regarde."
+    assert isinstance(sortie[1], cerveau.RECHERCHE)
+    assert sortie[2:] == ["Il s'appelle Pixel."]
