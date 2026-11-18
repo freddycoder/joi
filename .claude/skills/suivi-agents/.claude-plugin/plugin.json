@@ -1,0 +1,6 @@
+{
+  "name": "suivi-agents",
+  "version": "0.1.0",
+  "description": "Panneau qui montre en direct ce que chaque sous-agent lit, cherche ou lance",
+  "types": "./types/index.d.ts"
+}
