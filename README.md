@@ -289,7 +289,8 @@ donnees/
     └── journees/              un résumé par journée d'écoute
 ```
 
-- **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité.
+- **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité (3 500 caractères au plus
+  chacun ; un fichier coupé est signalé au journal technique).
 - **En conversation**, elle peut chercher un détail avec l'outil `se_souvenir`
   (dans ses fichiers, puis dans le journal).
 - **Après une conversation ou une écoute** (et 5 minutes après le démarrage si personne ne lui parle,
@@ -299,7 +300,16 @@ donnees/
 
 Chaque rangement est enregistré dans un dépôt git **local** (sans remote) :
 `git -C donnees/memoire log -p` montre ce qu'elle a retenu, et on peut annuler une passe ratée.
-Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime `donnees/memoire/`,
+Tu peux aussi corriger ses fichiers à la main.
+
+Une journée raconte (10 à 15 lignes), un projet garde l'état courant (une puce par sujet, mise à jour
+sur place). Pour resserrer une mémoire écrite avant ces règles, une fois, Joi arrêtée :
+`python -m joi.memoire condenser`. La bibliothécaire reprend les journées de plus de 8 Ko, les autres
+fichiers de plus de 6 Ko, `toi.md` et `index.md`, entre un commit « Avant » et un commit « Après ».
+La commande refuse de partir si Joi tourne ou si l'état d'avant ne peut pas être enregistré, et affiche
+à la fin la commande `git diff` pour relire et la commande `git revert` pour tout annuler.
+
+Pour repartir à zéro, supprime `donnees/memoire/`,
 `donnees/journal/` et `donnees/enregistrements/`.
 
 

@@ -8,6 +8,7 @@ les fichiers de tests. Si le dossier en vigueur est quand même le vrai, on arr�
 
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 
@@ -34,9 +35,15 @@ _SOUS_DOSSIERS = (config.DOSSIER_VOIX, config.DOSSIER_JOURNAL, config.DOSSIER_ME
                   config.DOSSIER_ENREGISTREMENTS, config.DOSSIER_LOGS)
 
 
+def _rendre_inscriptible(fonction, chemin, _erreur) -> None:
+    """Sous Windows, git écrit ses objets en lecture seule : on les rend inscriptibles pour les effacer."""
+    os.chmod(chemin, stat.S_IWRITE)
+    fonction(chemin)
+
+
 def _vider_donnees() -> None:
     if config.DOSSIER_DONNEES.exists():
-        shutil.rmtree(config.DOSSIER_DONNEES)
+        shutil.rmtree(config.DOSSIER_DONNEES, onexc=_rendre_inscriptible)
     for dossier in _SOUS_DOSSIERS:
         dossier.mkdir(parents=True, exist_ok=True)
 

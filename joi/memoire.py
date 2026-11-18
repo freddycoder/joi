@@ -10,6 +10,9 @@
   Une fois une écoute apprise, les conversations ouvertes sont prévenues (abonner).
 - Chaque passe est enregistrée dans un dépôt git local (donnees/memoire/.git, sans remote) :
   on peut voir ou annuler ce qu'elle a changé.
+- Une fois, à la main et Joi arrêtée : python -m joi.memoire condenser resserre selon les règles
+  actuelles ce qui a été écrit avant elles (longues journées, gros projets, toi.md, index.md), après
+  un commit « Avant » (sans lui, rien n'est fait) ; elle affiche de quoi relire et tout annuler.
 """
 
 import asyncio
@@ -34,7 +37,9 @@ from . import config, journal
 log = logging.getLogger("joi.memoire")
 
 RACINE = config.DOSSIER_MEMOIRE
-TAILLE_MAX_REVEIL = 8000  # caractères de mémoire injectés dans le prompt au réveil
+# Caractères injectés dans le prompt au réveil, par fichier (toi.md, index.md) : une limite chacun,
+# pour qu'un index qui grossit ne pousse pas toi.md dehors (ou l'inverse).
+TAILLE_MAX_REVEIL_FICHIER = 3500
 TAILLE_MAX_SOUVENIR = 3000  # caractères renvoyés par se_souvenir (fichiers trouvés et journal)
 TAILLE_MAX_JOURNEE = 16000  # en plus : le résumé des journées nommées (« aujourd'hui », « 16 novembre »)
 TAILLE_MAX_TRANCHE = 20000  # caractères de journal envoyés par message à la bibliothécaire
@@ -160,10 +165,15 @@ def contexte_reveil() -> str:
     for nom in ("toi.md", "index.md"):
         fichier = RACINE / nom
         if fichier.exists():
-            morceaux.append(f"### {nom}\n{fichier.read_text(encoding='utf-8').strip()}")
+            contenu = fichier.read_text(encoding="utf-8").strip()
+            if len(contenu) > TAILLE_MAX_REVEIL_FICHIER:
+                # La fin se perd : le dire au journal, pour que la condensation (ou la bibliothécaire)
+                # le resserre avant qu'il manque quelque chose d'important.
+                log.warning("Réveil : %s coupé (%d caractères pour %d permis).",
+                            nom, len(contenu), TAILLE_MAX_REVEIL_FICHIER)
+                contenu = _couper(contenu, TAILLE_MAX_REVEIL_FICHIER)
+            morceaux.append(f"### {nom}\n{contenu}")
     texte = "\n\n".join(morceaux)
-    if len(texte) > TAILLE_MAX_REVEIL:
-        texte = texte[:TAILLE_MAX_REVEIL] + "\n[…tronqué]"
     return f"\n\n## Ce que tu sais déjà (ta mémoire)\n{texte}\n" if texte else ""
 
 
@@ -242,6 +252,22 @@ def _couper(texte: str, taille: int) -> str:
     return texte[: coupe if coupe > taille // 2 else taille].rstrip() + "\n[…]"
 
 
+def _couper_tete_queue(texte: str, taille: int) -> str:
+    """Coupe le milieu d'un texte trop long : les deux tiers de la place pour le début, un tiers pour
+    la fin, à des fins de ligne. Une journée se lit dans l'ordre : couper par la fin faisait perdre
+    son soir (le résumé du 13 novembre perdait 35 %)."""
+    if len(texte) <= taille:
+        return texte
+    marque = "\n[…]\n"
+    place = taille - len(marque)
+    tete = _couper(texte, place * 2 // 3).removesuffix("\n[…]")
+    reste = place - len(tete)
+    debut_queue = len(texte) - reste
+    saut = texte.find("\n", debut_queue)
+    queue = texte[saut + 1:] if 0 <= saut < len(texte) - reste // 2 else texte[debut_queue:]
+    return tete + marque + queue.lstrip()
+
+
 def _extrait(lignes: list[str], normalisees: list[str], poids: dict[str, float], taille: int) -> str:
     """Les lignes d'un fichier qui contiennent les mots les plus rares, avec leurs voisines, dans
     l'ordre du fichier et sous la taille donnée : une ligne qui ne contient qu'un mot répandu
@@ -282,7 +308,7 @@ def souvenir(recherche: str, aujourdhui: date | None = None, stats: dict | None 
             deja_montres.add(fichier.resolve())
             contenu = fichier.read_text(encoding="utf-8").strip()
             resultats.append(f"[mémoire : journees/{jour}.md, le résumé de cette journée]\n"
-                             f"{_couper(contenu, TAILLE_MAX_JOURNEE // len(jours))}")
+                             f"{_couper_tete_queue(contenu, TAILLE_MAX_JOURNEE // len(jours))}")
         else:
             resultats.append(f"[mémoire : pas de résumé de la journée du {jour} (rien d'appris ce jour-là, "
                              "ou une écoute pas encore transcrite et apprise)]")
@@ -536,8 +562,12 @@ def _consignes_bibliothecaire() -> str:
     """Ses consignes, plus celles du compte de Joi s'il est actif (sans compte : inchangées)."""
     consignes = config.FICHIER_BIBLIOTHECAIRE.read_text(encoding="utf-8")
     if config.JOI_COMPTE:
+        from .compte import reglages
+
         compte = Path(__file__).resolve().parent / "compte" / "bibliothecaire.md"
-        consignes = consignes.rstrip() + "\n\n" + compte.read_text(encoding="utf-8")
+        # L'adresse de la personne (son .env) : un courriel ou une invitation à son nom est à elle.
+        consignes = consignes.rstrip() + "\n\n" + compte.read_text(encoding="utf-8").replace(
+            "{adresse_toi}", reglages.PROPRIETAIRE or "(pas encore réglée)")
     return consignes
 
 
@@ -676,9 +706,32 @@ async def noter_voix_du_jour(jour: str, bilan: str) -> None:
         await asyncio.to_thread(_enregistrer_version, f"Voix entendues le {jour}")
 
 
+PHRASES_MIN_TRANCHE = 5  # en dessous, une écoute en cours attend la passe suivante
+
+
+def _assez_pour_apprendre(ecoute: Ecoute) -> bool:
+    """Vaut-il la peine d'ouvrir la bibliothécaire pour cette séance ? Chaque passe relit l'état de
+    la mémoire et la journée entière : le 17 novembre, une tranche de 0 phrase a quand même appelé
+    le modèle. Sans aucune phrase, rien à apprendre : les segments sont marqués intégrés (ils ne
+    repasseront pas, et la journée peut se fermer le soir). Avec quelques phrases d'une écoute qui
+    continue, on ne marque rien : la passe suivante, ou celle du retour, les reprend avec la suite.
+    La fin d'une écoute (ou une correction) passe toujours, si courte soit-elle."""
+    phrases = sum(len(s.entrees) for s in ecoute.segments)
+    if phrases == 0:
+        log.info("Écoute du %s : tranche sans phrase, rien à apprendre.", ecoute.debut[:16].replace("T", " "))
+        for segment in ecoute.segments:
+            segment.integre()
+        return False
+    if phrases < PHRASES_MIN_TRANCHE and ecoute.en_cours and not ecoute.correction:
+        log.info("Écoute du %s : tranche trop courte (%d phrases), gardée pour la suivante.",
+                 ecoute.debut[:16].replace("T", " "), phrases)
+        return False
+    return True
+
+
 async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
     """Intègre à la mémoire ce qui a été entendu pendant des séances d'écoute déjà transcrites."""
-    ecoutes = [e for e in ecoutes if e.segments]
+    ecoutes = [e for e in ecoutes if e.segments and _assez_pour_apprendre(e)]
     if not ecoutes:
         return
     if _verrou_consolidation.locked():
@@ -720,7 +773,10 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                             )
                         else:
                             consigne = (f"Le résumé de cette journée va dans journees/{jour}.md "
-                                        "(lis-le d'abord s'il existe, puis complète-le). ")
+                                        "(lis-le d'abord s'il existe, puis complète-le). Si un fait "
+                                        "change l'état d'un projet (décision, date, achat, problème "
+                                        "réglé), mets aussi à jour sa ligne dans le fichier du projet ; "
+                                        "si un fait durable concerne la personne, mets à jour toi.md. ")
                         message = (
                             f"{_etat_memoire()}\n\n"
                             "ATTENTION : ceci est une ÉCOUTE, pas une conversation avec Joi. Joi écoutait "
@@ -745,6 +801,131 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
         _signaler_apprises(apprises)
 
 
+# --- Condensation unique (lancée par l'utilisateur) ------------------------------------------------
+
+SEUIL_CONDENSER_JOURNEE = 8000  # octets : au-delà, une journée est trop longue pour 10 à 15 lignes
+SEUIL_CONDENSER_FICHIER = 6000  # octets : au-delà, un projet devrait être scindé par sujet
+
+CONSIGNE_CONDENSER = (
+    "Ce n'est pas une nouvelle transcription : c'est un nettoyage unique, demandé par la personne, "
+    "pour appliquer tes consignes actuelles à un fichier écrit avec les anciennes. Lis-le, puis "
+    "réécris-le plus court : garde ce qui servira dans un mois (décisions, dates, engagements, "
+    "personnes, problèmes réglés et leur solution), retire le dépannage ponctuel, les numéros de "
+    "version et les commandes, fusionne ce qui se répète. Ne perds aucun fait durable : s'il a sa "
+    "place ailleurs (le fichier d'un projet, toi.md), mets-le là. N'invente rien. Garde tels quels "
+    "l'en-tête et la section « Voix entendues » d'une journée. Dans toi.md, note son nom complet et "
+    "ses adresses si tu les vois dans la mémoire (ses courriels, ses invitations), et corrige les "
+    "fichiers qui en font une tierce personne. Mets index.md à jour si tu crées, déplaces ou supprimes "
+    "un fichier."
+)
+
+
+def _a_condenser() -> list[str]:
+    """Les fichiers à condenser : les journées de plus de 8 Ko, les autres fichiers de plus de 6 Ko
+    (le projet principal), puis toi.md et index.md, toujours, en dernier (ils reprennent l'état des
+    autres)."""
+    fichiers = []
+    for chemin in _fichiers_md():
+        relatif = _relatif(chemin)
+        if relatif in ("toi.md", "index.md"):
+            continue
+        seuil = SEUIL_CONDENSER_JOURNEE if relatif.startswith("journees/") else SEUIL_CONDENSER_FICHIER
+        if chemin.stat().st_size > seuil:
+            fichiers.append(relatif)
+    return fichiers + ["toi.md", "index.md"]
+
+
+def _version_avant(message: str) -> str | None:
+    """Un commit, même sans changement, qui marque l'état d'avant. Rend son identifiant, ou None s'il
+    n'a pas pu être fait (pas de git, dépôt verrouillé, commit refusé) : sans lui, rien à relire ni
+    à annuler, donc pas de condensation."""
+    if not (RACINE / ".git").exists():
+        return None
+    _git("add", "-A")
+    commit = _git("commit", "--quiet", "--allow-empty", "-m", message)
+    if commit is None or commit.returncode != 0:
+        return None
+    tete = _git("rev-parse", "HEAD")
+    return tete.stdout.strip() if tete and tete.returncode == 0 else None
+
+
+@dataclass
+class Condensation:
+    avant: str | None  # le commit d'avant (None : rien n'a été fait)
+    confies: list[str]  # les fichiers que la bibliothécaire a traités jusqu'au bout
+    echecs: list[str]  # ceux où elle a échoué (délai, erreur) : laissés tels quels ou en partie
+
+
+async def condenser() -> Condensation:
+    """Condense la mémoire écrite avant les nouvelles règles de la bibliothécaire, après un commit
+    « Avant » du dépôt de la mémoire, pour que la personne relise le résultat avec git diff (et
+    l'annule si elle n'en veut pas). Un fichier qui échoue n'arrête pas les suivants."""
+    initialiser()
+    async with _verrou_consolidation:
+        avant = await asyncio.to_thread(_version_avant, "Avant la condensation")
+        if avant is None:
+            log.error("Condensation annulée : impossible d'enregistrer l'état d'avant dans le dépôt git "
+                      "de la mémoire (git absent, ou dépôt verrouillé : Joi tourne-t-elle ?).")
+            return Condensation(None, [], [])
+        fichiers = _a_condenser()
+        confies, echecs = [], []
+        try:
+            async with _bibliothecaire() as session:
+                for chemin in fichiers:
+                    log.info("Condensation de %s…", chemin)
+                    message = f"{_etat_memoire()}\n\nCONDENSER : {chemin}\n{CONSIGNE_CONDENSER}"
+                    try:
+                        await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
+                        confies.append(chemin)
+                    except Exception:
+                        log.exception("Condensation de %s interrompue", chemin)
+                        echecs.append(chemin)
+        except Exception:  # la bibliothécaire n'a pas pu s'ouvrir (Copilot non connecté…)
+            log.exception("Condensation impossible")
+            echecs = [f for f in fichiers if f not in confies]
+        finally:
+            resume = f"{len(confies)} fichier(s) sur {len(fichiers)}"
+            if echecs:
+                resume += f", échec : {', '.join(echecs)}"
+            await asyncio.to_thread(_enregistrer_version, f"Après la condensation ({resume})")
+    return Condensation(avant, confies, echecs)
+
+
+def _joi_en_marche() -> bool:
+    """Le serveur de Joi répond-il ? Il écrirait dans la mémoire pendant la condensation."""
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", config.JOI_PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def main(arguments: list[str] | None = None) -> int:
+    """python -m joi.memoire condenser : la condensation unique, à lancer Joi arrêtée."""
+    import argparse
+
+    analyseur = argparse.ArgumentParser(prog="python -m joi.memoire", description=main.__doc__)
+    analyseur.add_argument("commande", choices=["condenser"])
+    analyseur.parse_args(arguments)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    if _joi_en_marche():
+        print(f"Joi tourne (port {config.JOI_PORT}) : arrête-la d'abord, elle écrirait dans la mémoire "
+              "pendant la condensation.")
+        return 1
+    resultat = asyncio.run(condenser())
+    if resultat.avant is None:
+        print("Rien n'a été fait : l'état d'avant n'a pas pu être enregistré (voir le journal).")
+        return 1
+    print(f"{len(resultat.confies)} fichier(s) condensé(s)"
+          + (f", {len(resultat.echecs)} en échec : {', '.join(resultat.echecs)}" if resultat.echecs else "")
+          + f'.\nPour relire : git -C "{RACINE}" diff {resultat.avant[:10]}'
+          + f'\nPour tout annuler : git -C "{RACINE}" revert --no-edit {resultat.avant[:10]}..HEAD')
+    return 0 if not resultat.echecs else 1
+
+
 def description(chemin: str) -> str:
     """La ligne « description: » d'un fichier de la mémoire (vide s'il n'en a pas)."""
     try:
@@ -755,3 +936,12 @@ def description(chemin: str) -> str:
         if ligne.startswith("description:"):
             return ligne.removeprefix("description:").strip()
     return ""
+
+
+if __name__ == "__main__":
+    # Par le module importé, pas par __main__ : une seule copie de la mémoire (et de son verrou).
+    import sys
+
+    from joi import memoire as _memoire
+
+    sys.exit(_memoire.main(sys.argv[1:]))
