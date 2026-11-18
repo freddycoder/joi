@@ -267,10 +267,12 @@ def test_un_oui_qui_ne_vient_pas_de_la_personne_est_refuse():
     from joi.compte.integration import Integration
 
     integration = Integration(repli=lambda *a: None)
+    engagements.ajouter([_proposition("p0000e", "Essayer l'outil")])
+    engagements.noter_montrees(["p0000e"])
 
-    def demande(reponse):
+    def demande(reponse, args=None):
         requete = SimpleNamespace(kind="mcp", server_name="compte", tool_name="compte-marquer_proposition",
-                                  args={"numero": "p0000e", "reponse": reponse})
+                                  args=args if args is not None else {"numero": "p0000e", "reponse": reponse})
         return integration.permission(requete, None)
 
     assert isinstance(demande("oui"), PermissionDecisionReject)  # la personne n'a rien dit
@@ -281,6 +283,39 @@ def test_un_oui_qui_ne_vient_pas_de_la_personne_est_refuse():
     integration.noter_tour("Non, laisse faire.")
     assert isinstance(demande("oui"), PermissionDecisionReject)
     assert isinstance(demande("non"), PermissionDecisionApproveOnce)  # un refus n'a pas besoin de oui
+
+    # Tout ce qui n'est pas clairement conforme est refusé.
+    integration.noter_tour("Oui.")
+    assert isinstance(demande(None, args='{"numero": "p0000e", "reponse": "oui"}'), PermissionDecisionApproveOnce)
+    assert isinstance(demande(None, args="pas du json"), PermissionDecisionReject)
+    assert isinstance(demande(None, args=["oui"]), PermissionDecisionReject)
+    assert isinstance(demande("OUI"), PermissionDecisionReject)
+    assert isinstance(demande(None, args={"numero": "p9999z", "reponse": "oui"}), PermissionDecisionReject)
+
+
+def test_un_oui_trop_ancien_ou_une_proposition_jamais_montree_est_refuse(monkeypatch):
+    from types import SimpleNamespace
+
+    from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
+
+    from joi.compte import brouillons
+    from joi.compte.integration import AGE_MAX_OUI, Integration
+
+    integration = Integration(repli=lambda *a: None)
+    engagements.ajouter([_proposition("p0000h", "Essayer l'outil")])
+
+    def demande():
+        requete = SimpleNamespace(kind="mcp", server_name="compte", tool_name="compte-marquer_proposition",
+                                  args={"numero": "p0000h", "reponse": "oui"})
+        return integration.permission(requete, None)
+
+    integration.noter_tour("Oui, fais-en une tâche.")
+    assert isinstance(demande(), PermissionDecisionReject)  # jamais montrée à un réveil
+    engagements.noter_montrees(["p0000h"])
+    assert isinstance(demande(), PermissionDecisionApproveOnce)
+    maintenant = brouillons.time.time()
+    monkeypatch.setattr(brouillons.time, "time", lambda: maintenant + AGE_MAX_OUI + 1)
+    assert isinstance(demande(), PermissionDecisionReject)  # un oui d'il y a plus de trois minutes
 
 
 # --- Après une écoute apprise ----------------------------------------------------------------------
