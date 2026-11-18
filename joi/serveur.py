@@ -40,8 +40,9 @@ Copilot par un serveur MCP. Ici, la veille vérifie les nouveaux courriels toute
 JOI_COURRIEL_VERIFIER_MINUTES et les glisse dans la conversation, sous forme de message système,
 quand Joi est inactive depuis 10 s (en mode écoute : au retour). Sans compte, rien de tout ça.
 
-Avant l'annonce, Joi connaît déjà ces courriels : ils partent, en note, devant le tour suivant de la
-personne (« as-tu reçu des courriels ? » juste au retour de l'écoute). De même, si l'écoute est encore
+Avant l'annonce, Joi sait déjà que ces courriels sont arrivés : leur nombre (rien d'écrit par un
+tiers) part, en note, devant le tour suivant de la personne, et elle les lit avec ses outils si on
+lui demande « as-tu reçu des courriels ? » juste au retour de l'écoute. De même, si l'écoute est encore
 en train d'être apprise, une note le lui dit une fois, pour qu'elle n'invente rien sur ce qu'elle a
 entendu. Le SDK n'a pas de moyen public d'ajouter un message à l'historique sans faire répondre le
 modèle : la note voyage donc avec le tour de la personne, et seuls ses mots comptent pour confirmer
@@ -1049,15 +1050,17 @@ class Conversation:
                 "[apprentissage fini] Tu as fini d'apprendre ce que tu as entendu : pour en parler, "
                 "cherche avec se_souvenir en nommant la journée.")
         if self._courriels_a_glisser:
-            from .compte.modele import externe, ligne_courriel
-
+            # Le nombre seulement, jamais l'expéditeur, le sujet ni l'aperçu : la note voyage dans le
+            # tour de la personne, et rien d'écrit par un tiers ne doit y entrer. Joi lit les courriels
+            # avec ses outils (résultat d'outil, balisé comme contenu externe), ou par l'annonce
+            # (message système), comme avant.
             lot, self._courriels_a_glisser = self._courriels_a_glisser, []
             quand = ("pendant que tu écoutais en silence" if any(p for _, p in lot)
                      else "pendant que vous parliez")
+            nombre = "Un courriel est arrivé" if len(lot) == 1 else f"{len(lot)} courriels sont arrivés"
             morceaux.append(
-                f"[courriels reçus {quand}, pas encore annoncés]\n"
-                + externe("\n".join(f"- {ligne_courriel(c)}" for c, _ in lot)) + "\n"
-                "Parles-en seulement si on te demande tes courriels.")
+                f"[courriels pas encore annoncés] {nombre} dans ta boîte {quand}. Si on te demande "
+                "tes courriels, consulte-les avec courriels_recents avant de répondre.")
         if not morceaux:
             return None
         return ("\n\n".join(morceaux)

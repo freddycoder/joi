@@ -76,14 +76,16 @@ def test_courriel_recu_pendant_l_ecoute_connu_avant_la_reponse(conversation):
 
     asyncio.run(scenario())
     (premier, options), (second, _) = conversation.cerveau._session.envois
-    assert "Le devis du client" in premier and "pendant que tu écoutais" in premier
+    assert "Un courriel est arrivé" in premier and "pendant que tu écoutais" in premier
+    assert "courriels_recents" in premier
     # La note vient avant les mots de la personne, et ses mots restent intacts à la fin.
-    assert premier.index("Le devis du client") < premier.index("As-tu reçu des courriels ?")
+    assert premier.index("Un courriel est arrivé") < premier.index("As-tu reçu des courriels ?")
     assert premier.endswith("As-tu reçu des courriels ?")
     assert "source" not in options  # un tour de la personne, pas un message système de plus
-    assert "[contenu externe" in premier  # le courriel reste une donnée, pas une consigne
+    # Rien d'écrit par un tiers n'entre dans le tour de la personne : ni sujet, ni expéditeur.
+    assert "Le devis du client" not in premier and "collègue" not in premier.lower()
     # Une seule fois ; l'annonce, elle, reste à faire quand Joi sera inactive.
-    assert "Le devis du client" not in second
+    assert "courriel" not in second
     assert conversation._courriels
 
 

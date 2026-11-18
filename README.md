@@ -214,8 +214,8 @@ Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne
 conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
 ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
 « Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que
-j'écoutais… ») ; elle les connaît dès ta première phrase, même si l'annonce attend encore, et peut
-donc répondre juste à « as-tu reçu des courriels ? ». Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
+j'écoutais… ») ; elle sait qu'ils sont arrivés dès ta première phrase, même si l'annonce attend encore,
+et les consulte si tu lui demandes « as-tu reçu des courriels ? ». Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
 résumé, et la bibliothécaire en retient ce qui te concerne.
 
 **Comment c'est branché.** Les outils vivent dans un serveur MCP local (`python -m joi.compte`, en stdio)
