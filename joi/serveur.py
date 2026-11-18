@@ -320,9 +320,18 @@ class MesureReponse:
       MP3 envoyé → lecture         le navigateur décode et commence à jouer (message « lecture »)
 
     Le premier son peut être une phrase d'attente (« Laisse-moi me rappeler… ») quand Joi fouille sa
-    mémoire : c'est bien ce que la personne entend en premier."""
+    mémoire : c'est bien ce que la personne entend en premier. La ligne dit alors aussi quand est
+    parti le son de la première vraie phrase (« vraie réponse ») : sans elle, le total serait trompeur.
 
-    def __init__(self, tour: Tour | None):
+    modele : le modèle Copilot (None : celui de Copilot par défaut), pour comparer d'un jour à l'autre."""
+
+    def __init__(self, tour: Tour | None, modele: str | None = None):
+        self.modele = modele
+        self.consultations = 0  # du compte de Joi (agenda, courriels…)
+        self.attente = False  # le premier son est une phrase d'attente, dite pendant un outil
+        # L'envoi du son de la première vraie phrase : après la phrase d'attente, c'est la réponse que
+        # la personne attend vraiment (le total, lui, s'arrête à la phrase d'attente).
+        self.son_reponse: float | None = None
         self.fin_parole = tour.fin_parole if tour else None
         self.tour_final = tour.recu if tour else None
         self.envoi: float | None = None
@@ -349,6 +358,9 @@ class MesureReponse:
             "lecture": self._ecart(self.mp3_envoye, self.lecture),
             "total": self._ecart(debut, self.lecture or self.mp3_envoye),
             "recherches": self.recherches,
+            "consultations": self.consultations,
+            "vraie_reponse": self._ecart(debut, self.son_reponse) if self.attente else None,
+            "modele": self.modele or "défaut",
         }
 
     def ligne(self) -> str:
@@ -362,7 +374,10 @@ class MesureReponse:
         return (f"Latence : fin de tour {s('fin_de_tour')} · cerveau : 1er mot {s('premier_mot')}, "
                 f"1re phrase {s('premiere_phrase')} · synthèse {s('synthese')}{cache} · "
                 f"lecture {s('lecture')} · total {s('total')} ({debut} → premier son)"
-                + (f" · {r['recherches']} recherche(s)" if r["recherches"] else ""))
+                + (f" · vraie réponse {s('vraie_reponse')} (après la phrase d'attente)" if self.attente else "")
+                + f" · modèle {r['modele']}"
+                + (f" · {r['recherches']} recherche(s)" if r["recherches"] else "")
+                + (f" · {r['consultations']} consultation(s) du compte" if r["consultations"] else ""))
 
 
 class GardeFouSilence:
@@ -885,7 +900,7 @@ class Conversation:
         if not systeme:
             if self._mesure:  # la réponse précédente n'a jamais été jouée : on la note quand même
                 self._terminer_mesure()
-            mesure = self._mesure = MesureReponse(tour)
+            mesure = self._mesure = MesureReponse(tour, modele=getattr(self.cerveau, "modele", None))
             journal.noter("toi", texte)
             await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
@@ -932,6 +947,8 @@ class Conversation:
                     await self.envoyer_audio(audio)
                     if mesure and mesure.mp3_envoye is None:
                         mesure.synthese, mesure.mp3_envoye = infos, time.monotonic()
+                    if mesure and not attente and mesure.son_reponse is None:
+                        mesure.son_reponse = time.monotonic()  # la vraie réponse, pas l'attente
 
         envoi = asyncio.create_task(envoyer_dans_l_ordre())
 
@@ -949,6 +966,8 @@ class Conversation:
             nonlocal attente_dite
             if not attente_dite and not dites and not systeme:
                 attente_dite = True
+                if mesure:
+                    mesure.attente = True
                 await dire(random.choice(phrases), attente=True)
 
         try:
@@ -1009,6 +1028,7 @@ class Conversation:
             self._derniere_activite = time.monotonic()
             if mesure:
                 mesure.recherches = recherches
+                mesure.consultations = consultations
                 mesure.reponse_finie = True
                 # Sans son, ou déjà en lecture : rien de plus à attendre du navigateur.
                 if self._mesure is mesure and (mesure.mp3_envoye is None or mesure.lecture is not None):

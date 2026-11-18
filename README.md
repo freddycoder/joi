@@ -53,7 +53,8 @@ derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'holog
 **Latence.** Chaque réponse ajoute une ligne « Latence : » au journal technique, et le bloc « Latence » du
 monitoring montre la dernière réponse et la médiane : fin de tour (AssemblyAI décide que tu as fini de
 parler), cerveau (premier mot, première phrase), synthèse de la voix, début de la lecture, et le total de
-la fin de ta phrase au premier son. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
+la fin de ta phrase au premier son. La ligne dit aussi le modèle (« défaut » sans `JOI_MODELE`), les
+recherches et consultations du compte, et, après une phrase d'attente, quand la vraie réponse s'est fait entendre. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
 `JOI_FIN_TOUR_SILENCE_MIN_MS` / `_MAX_MS` dans `.env` (vides : les valeurs d'AssemblyAI). Pour comparer
 les modèles Copilot, sans micro : `.venv\Scripts\python -m joi.banc MODELE1 MODELE2` (chaque phrase
 consomme une requête Copilot ; `--lister`, `--phrases N`). Il ne change pas `JOI_MODELE`.
@@ -184,7 +185,8 @@ Le rejeu n'écrit ni dans le journal ni dans la mémoire ; il garde les empreint
 
 **Coûts.** Le streaming n'est pas utilisé en écoute : on ne paie que la transcription différée,
 environ 0,23 $ US de l'heure (modèle Pro et séparation des voix). Une journée de 8 h revient à moins de 2 $.
-La console affiche les heures transcrites et une estimation du coût après chaque écoute.
+La console affiche les heures transcrites et une estimation du coût après chaque écoute, puis le cumul
+du jour (« Coût de transcription du … »), repris par la révision des données.
 
 **Vie privée.** Les personnes autour (collègues, clients) devraient savoir qu'elles sont enregistrées.
 L'audio passe par AssemblyAI, puis le texte par Copilot. Pour limiter l'exposition :

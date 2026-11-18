@@ -27,8 +27,8 @@ ETAPES_LATENCE = ("fin_de_tour", "premier_mot", "premiere_phrase", "synthese", "
 
 def resume_latences() -> dict:
     """La dernière réponse, et la médiane de chaque étape sur les dernières réponses sans recherche
-    en mémoire (une recherche ajoute plusieurs secondes et brouillerait la médiane)."""
-    simples = [m for m in latences if not m.get("recherches")]
+    en mémoire ni consultation du compte (elles ajoutent plusieurs secondes et brouilleraient la médiane)."""
+    simples = [m for m in latences if not m.get("recherches") and not m.get("consultations")]
     medianes = {}
     for etape in ETAPES_LATENCE:
         valeurs = sorted(m[etape] for m in simples if m.get(etape) is not None)
