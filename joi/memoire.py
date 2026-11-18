@@ -85,6 +85,23 @@ def _signaler_apprises(jours: list[str]) -> None:
             log.exception("Signalement d'une journée apprise impossible")
 
 
+# Prévenus avec les séances d'écoute elles-mêmes (leurs phrases), une fois apprises : le relevé des
+# engagements de la personne (joi/compte/engagements.py, compte actif seulement).
+_abonnes_ecoutes: list[Callable[[list["Ecoute"]], None]] = []
+
+
+def abonner_ecoutes(rappel: Callable[[list["Ecoute"]], None]) -> None:
+    _abonnes_ecoutes.append(rappel)
+
+
+def _signaler_ecoutes(ecoutes: list["Ecoute"]) -> None:
+    for rappel in list(_abonnes_ecoutes):
+        try:
+            rappel(ecoutes)
+        except Exception:
+            log.exception("Signalement d'une écoute apprise impossible")
+
+
 # --- Fichiers ---------------------------------------------------------------------------------
 
 def initialiser() -> None:
@@ -800,6 +817,7 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
             await asyncio.to_thread(_enregistrer_version, f"Écoute du {debuts}")
     if apprises:
         _signaler_apprises(apprises)
+        _signaler_ecoutes([e for e in ecoutes if e.debut[:10] in apprises])
 
 
 # --- Condensation unique (lancée par l'utilisateur) ------------------------------------------------

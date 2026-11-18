@@ -41,8 +41,10 @@ JOI_COURRIEL_VERIFIER_MINUTES et les glisse dans la conversation, sous forme de 
 quand Joi est inactive depuis 10 s (en mode écoute : au retour). Le contexte du réveil (non lus,
 agendas, tâches) est gardé en mémoire et rafraîchi toutes les 5 minutes, et après chaque conversation :
 Joi se réveille sans attendre Microsoft, avec un contexte qui dit l'heure où il a été vu. Quand personne
-n'est là, les nouveaux courriels sont notés au journal à ce même rythme, sans annonce. Sans compte,
-rien de tout ça.
+n'est là, les nouveaux courriels sont notés au journal à ce même rythme, sans annonce. Après chaque
+écoute apprise, une passe du modèle sans outils relève ce que la personne a dit qu'elle ferait
+(joi/compte/engagements.py, le code trie) ; Joi le lui propose au réveil, une fois, et seul un oui de
+la personne en fait une tâche (jamais un courriel ni une invitation). Sans compte, rien de tout ça.
 
 Avant l'annonce, Joi sait déjà que ces courriels sont arrivés : leur nombre (rien d'écrit par un
 tiers) part, en note, devant le tour suivant de la personne, et elle les lit avec ses outils si on
@@ -242,6 +244,21 @@ async def _prechauffer_cerveau() -> None:
         log.warning("Client Copilot pas encore démarré (il le sera au réveil) : %s", e)
 
 
+def _demarrer_compte() -> None:
+    """Le compte (optionnel) : sans JOI_COMPTE, rien de joi.compte n'est importé."""
+    if config.JOI_COMPTE_REFUSE:
+        log.warning("JOI_COMPTE=%s n'est pas pris en charge (microsoft seulement pour l'instant) : "
+                    "Joi démarre sans compte.", config.JOI_COMPTE_REFUSE)
+    if not config.JOI_COMPTE:
+        return
+    _en_fond(_veiller_courriels())
+    _en_fond(_tenir_contexte_compte())
+    # Les engagements de la personne entendus pendant l'écoute, relevés après chaque écoute apprise.
+    from .compte import engagements
+
+    engagements.installer(_en_fond)
+
+
 @asynccontextmanager
 async def cycle_de_vie(_app: FastAPI):
     monitoring.installer()
@@ -255,12 +272,7 @@ async def cycle_de_vie(_app: FastAPI):
     # Le modèle de reconnaissance des voix (~10 s à charger, téléchargé une fois), prêt au premier tour.
     _en_fond(asyncio.to_thread(empreintes.preparer))
     _en_fond(_surveiller_fin_de_journee())
-    if config.JOI_COMPTE_REFUSE:
-        log.warning("JOI_COMPTE=%s n'est pas pris en charge (microsoft seulement pour l'instant) : "
-                    "Joi démarre sans compte.", config.JOI_COMPTE_REFUSE)
-    if config.JOI_COMPTE:
-        _en_fond(_veiller_courriels())
-        _en_fond(_tenir_contexte_compte())
+    _demarrer_compte()
     yield
     await arreter_client_partage()
 

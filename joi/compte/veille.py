@@ -19,10 +19,10 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from . import journal_compte, reglages
+from . import engagements, journal_compte, reglages
 from .fournisseur import CompteDeconnecte, ErreurCompte, choisir
 from .modele import (Courriel, date_complete, externe, ligne_courriel, ligne_evenement, ligne_tache,
                      maintenant, numero_court)
@@ -48,6 +48,7 @@ class _Contexte:
     quand: datetime
     complet: bool = True
     deconnecte: bool = False
+    propositions: list[str] = field(default_factory=list)  # les numéros des engagements proposés
 
 
 class Veille:
@@ -158,6 +159,7 @@ class Veille:
         if cache is not None:
             log.info("Contexte du compte servi depuis celui de %s ; rafraîchi en fond.", f"{cache.quand:%H:%M}")
             self._lancer_rafraichissement()
+            await self._noter_montrees(cache)
             return self._texte(cache, depuis_cache=True)
         try:
             contexte = await asyncio.wait_for(asyncio.to_thread(self._contexte), DELAI_REVEIL)
@@ -169,7 +171,16 @@ class Veille:
             log.exception("Contexte du compte impossible au réveil")
             return ""
         self._garder(contexte)
+        await self._noter_montrees(contexte)
         return self._texte(contexte, depuis_cache=False)
+
+    @staticmethod
+    async def _noter_montrees(contexte: _Contexte) -> None:
+        """Les engagements de ce contexte sont donnés à Joi : ils ne reviendront pas un autre jour."""
+        try:
+            await asyncio.to_thread(engagements.noter_montrees, contexte.propositions)
+        except Exception:
+            log.exception("Propositions montrées impossibles à noter")
 
     # --- Le contexte gardé --------------------------------------------------------------------
 
@@ -251,12 +262,35 @@ class Veille:
         return (["Tes tâches (ta liste de choses à faire, à rappeler à la personne si c'est le moment) :"]
                 + [f"- {ligne_tache(t, numero_court('t', t.id))}" for t in taches])
 
+    @staticmethod
+    def _bloc_engagements() -> tuple[list[str], list[str]]:
+        """Ce que la personne a dit qu'elle ferait, entendu pendant l'écoute (fichier local, pas de
+        réseau). La consigne n'entre dans le prompt que s'il y a quelque chose à proposer."""
+        try:
+            ouvertes = engagements.a_proposer()
+        except Exception:
+            log.exception("Propositions d'engagements illisibles")
+            return [], []
+        if not ouvertes:
+            return [], []
+        lignes = []
+        for p in ouvertes:
+            dite = datetime.fromisoformat(p["dite_le"])
+            pour = f", pour le {date_courte(p['echeance'])}" if p.get("echeance") else ""
+            lignes.append(f"- {p['numero']} : {p['titre']} (dit le {date_courte(dite.date().isoformat())} "
+                          f"à {dite:%H:%M}{pour}) : « {p['citation']} »")
+        return ["Ce que la personne a dit qu'elle ferait, entendu pendant l'écoute. Propose-lui chacun une "
+                "fois, en une phrase, au moment opportun (« hier tu as dit que…, je t'en fais une tâche ? »), "
+                "puis marquer_proposition avec sa réponse :", externe("\n".join(lignes))], \
+            [p["numero"] for p in ouvertes]
+
     def _contexte(self, avec_nouveaux: bool = True) -> _Contexte:
         """Les blocs (nouveaux courriels au journal, non lus, agenda, tâches) sont indépendants : ils
         partent en parallèle, chacun dans son fil (le client HTTP et le cache des jetons sont sûrs entre
         fils). Un bloc en erreur est remplacé par une phrase qui le dit."""
         quand = maintenant()
-        blocs = {"courriels": self._bloc_courriels, "agenda": self._bloc_agenda, "taches": self._bloc_taches}
+        blocs = {"courriels": self._bloc_courriels, "agenda": self._bloc_agenda, "taches": self._bloc_taches,
+                 "engagements": self._bloc_engagements}
         if avec_nouveaux:
             blocs["nouveaux"] = self._nouveaux  # au journal, ceux arrivés depuis la dernière fois
         with ThreadPoolExecutor(max_workers=len(blocs), thread_name_prefix="veille") as fils:
@@ -276,12 +310,21 @@ class Veille:
                               "parle de tes courriels ou de l'agenda, dis-le-lui simplement."],
                              quand, complet=False, deconnecte=True)
         repli = {"courriels": ["Tes courriels ne sont pas disponibles pour l'instant."],
-                 "agenda": ["L'agenda n'est pas disponible pour l'instant."], "taches": []}
+                 "agenda": ["L'agenda n'est pas disponible pour l'instant."], "taches": [], "engagements": []}
+        lignes_engagements, propositions = resultats.get("engagements", ([], []))
+        resultats["engagements"] = lignes_engagements
         lignes = []
-        for nom in ("courriels", "agenda", "taches"):
+        for nom in ("courriels", "agenda", "taches", "engagements"):
             lignes += resultats[nom] if nom in resultats else repli[nom]
         # Les nouveaux courriels ne s'affichent pas : leur échec ne rend pas le contexte incomplet.
-        return _Contexte(lignes, quand, complet=not (erreurs.keys() & {"courriels", "agenda", "taches"}))
+        return _Contexte(lignes, quand, complet=not (erreurs.keys() & {"courriels", "agenda", "taches"}),
+                         propositions=propositions)
+
+
+def date_courte(jour: str) -> str:
+    """« 2026-11-17 » -> « mardi 17 »."""
+    d = datetime.fromisoformat(jour)
+    return f"{('lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche')[d.weekday()]} {d.day}"
 
 
 _instance: Veille | None = None
@@ -292,3 +335,9 @@ def instance() -> Veille:
     if _instance is None:
         _instance = Veille()
     return _instance
+
+
+def invalider() -> None:
+    """Invalide le contexte gardé, s'il y a une veille (sinon, rien à invalider)."""
+    if _instance is not None:
+        _instance.invalider()

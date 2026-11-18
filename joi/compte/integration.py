@@ -18,7 +18,7 @@ from typing import Callable
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from .. import config
-from . import OUTILS, OUTILS_ECRITURE, SERVEUR, brouillons, reglages, veille
+from . import OUTILS, OUTILS_ECRITURE, SERVEUR, brouillons, engagements, reglages, veille
 
 log = logging.getLogger("joi.compte")
 
@@ -82,7 +82,18 @@ class Integration:
                 log.info("Envoi du brouillon %s refusé : %s", arguments.get("brouillon"), raison)
                 return PermissionDecisionReject(feedback=raison)
             log.info("Envoi du brouillon %s confirmé par la personne.", arguments.get("brouillon"))
+        if outil == "marquer_proposition":
+            arguments = requete.args if isinstance(requete.args, dict) else {}
+            if arguments.get("reponse") == "oui":
+                # Un engagement entendu ne devient une tâche que sur un oui de la personne elle-même,
+                # dans le tour où Joi le lui a proposé (pas un oui à une autre question, ni rien).
+                tour = self.confirmation.dernier_tour()
+                if not tour or not engagements.est_oui(tour):
+                    log.info("Proposition %s : pas de oui clair, tâche refusée.", arguments.get("numero"))
+                    return PermissionDecisionReject(
+                        feedback="La personne n'a pas dit oui clairement : la tâche n'est pas créée. Dis-lui "
+                                 "que tu ne l'as pas notée et redemande simplement « je t'en fais une tâche ? ».")
         if outil in OUTILS_ECRITURE:
             # Le contexte du réveil gardé en mémoire ne dit plus vrai (tâche cochée, événement créé).
-            veille.instance().invalider()
+            veille.invalider()
         return PermissionDecisionApproveOnce()

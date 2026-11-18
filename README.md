@@ -210,7 +210,11 @@ En conversation, elle peut :
 - lire son agenda et le tien (partagé avec elle en lecture) : « qu'est-ce que j'ai demain ? » ;
 - créer un rappel : un événement dans son agenda, avec une invitation à ton adresse. Une fois l'invitation
   acceptée, ton agenda te le rappelle sur ton téléphone. Elle peut le déplacer ou l'annuler ;
-- tenir une liste de choses à faire sans heure (la liste « Joi » de Microsoft To Do).
+- tenir une liste de choses à faire sans heure (la liste « Joi » de Microsoft To Do) ;
+- te proposer, au réveil, ce que tu as dit pendant l'écoute que tu ferais (« hier tu as dit que tu
+  essaierais le CRM aujourd'hui, je t'en fais une tâche ? »). Seules tes phrases à toi (ta voix
+  reconnue) comptent ; chaque engagement est proposé une fois, et seul ton oui en fait une tâche, jamais
+  un courriel ni une invitation. Les propositions sont dans `donnees/compte/propositions.json`.
 
 Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches : ce contexte
 est préparé au démarrage et rafraîchi toutes les 5 minutes (quand personne n'est là, les nouveaux

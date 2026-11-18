@@ -163,6 +163,10 @@ class SuiviConfirmation:
         self._tours.append((time.time(), texte))
         del self._tours[:-50]
 
+    def dernier_tour(self) -> str | None:
+        """Le dernier tour de parole de la personne (celui auquel Joi répond en ce moment)."""
+        return self._tours[-1][1] if self._tours else None
+
     def verifier(self, numero) -> str | None:
         """None si l'envoi du brouillon est confirmé, sinon la raison du refus (renvoyée au modèle)."""
         try:
