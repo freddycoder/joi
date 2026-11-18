@@ -12,6 +12,7 @@ dépend pas des noms de fuseaux acceptés par l'en-tête Prefer: outlook.timezon
 
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Callable
@@ -103,6 +104,10 @@ class Microsoft:
         self._agendas: list[dict] | None = None
         self._agendas_quand = 0.0
         self._liste_taches: str | None = None
+        # La veille appelle Graph depuis plusieurs fils à la fois (contexte du réveil) : le client httpx
+        # et le cache MSAL sont sûrs entre fils, mais pas la création paresseuse de l'application ni deux
+        # rafraîchissements du même jeton en même temps.
+        self._verrou_jeton = threading.Lock()
 
     # --- Connexion ----------------------------------------------------------------------------
 
@@ -134,10 +139,11 @@ class Microsoft:
         return comptes[0] if comptes else None
 
     def _jeton(self, forcer: bool = False) -> str:
-        compte = self._compte()
-        if not compte:
-            raise CompteDeconnecte("aucune connexion enregistrée")
-        resultat = self._app().acquire_token_silent(PORTEES, account=compte, force_refresh=forcer)
+        with self._verrou_jeton:
+            compte = self._compte()
+            if not compte:
+                raise CompteDeconnecte("aucune connexion enregistrée")
+            resultat = self._app().acquire_token_silent(PORTEES, account=compte, force_refresh=forcer)
         if not resultat or "access_token" not in resultat:
             raison = (resultat or {}).get("error") or "jeton expiré"
             raise CompteDeconnecte(raison)

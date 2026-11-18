@@ -18,7 +18,7 @@ from typing import Callable
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from .. import config
-from . import OUTILS, SERVEUR, brouillons, reglages, veille
+from . import OUTILS, OUTILS_ECRITURE, SERVEUR, brouillons, reglages, veille
 
 log = logging.getLogger("joi.compte")
 
@@ -82,4 +82,7 @@ class Integration:
                 log.info("Envoi du brouillon %s refusé : %s", arguments.get("brouillon"), raison)
                 return PermissionDecisionReject(feedback=raison)
             log.info("Envoi du brouillon %s confirmé par la personne.", arguments.get("brouillon"))
+        if outil in OUTILS_ECRITURE:
+            # Le contexte du réveil gardé en mémoire ne dit plus vrai (tâche cochée, événement créé).
+            veille.instance().invalider()
         return PermissionDecisionApproveOnce()

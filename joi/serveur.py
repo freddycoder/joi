@@ -38,7 +38,11 @@ Routes HTTP du tableau de bord (panneaux latéraux de l'interface, voir joi/moni
 Le compte de Joi (optionnel, JOI_COMPTE ; voir joi/compte/) : ses outils sont servis à la session
 Copilot par un serveur MCP. Ici, la veille vérifie les nouveaux courriels toutes les
 JOI_COURRIEL_VERIFIER_MINUTES et les glisse dans la conversation, sous forme de message système,
-quand Joi est inactive depuis 10 s (en mode écoute : au retour). Sans compte, rien de tout ça.
+quand Joi est inactive depuis 10 s (en mode écoute : au retour). Le contexte du réveil (non lus,
+agendas, tâches) est gardé en mémoire et rafraîchi toutes les 5 minutes, et après chaque conversation :
+Joi se réveille sans attendre Microsoft, avec un contexte qui dit l'heure où il a été vu. Quand personne
+n'est là, les nouveaux courriels sont notés au journal à ce même rythme, sans annonce. Sans compte,
+rien de tout ça.
 
 Avant l'annonce, Joi sait déjà que ces courriels sont arrivés : leur nombre (rien d'écrit par un
 tiers) part, en note, devant le tour suivant de la personne, et elle les lit avec ses outils si on
@@ -191,7 +195,7 @@ async def _veiller_courriels() -> None:
     while True:
         await asyncio.sleep(reglages.VERIFIER_MINUTES * 60)
         if not _conversations:
-            continue  # personne n'est là : le prochain réveil les rattrapera
+            continue  # personne n'est là : _tenir_contexte_compte les note sans les annoncer
         nouveaux = await veille.instance().verifier()
         pertinents = [c for c in nouveaux if c.pertinent]
         if len(pertinents) < len(nouveaux):
@@ -200,6 +204,23 @@ async def _veiller_courriels() -> None:
         if pertinents:
             for conversation in list(_conversations):
                 conversation.recevoir_courriels(pertinents)
+
+
+async def _tenir_contexte_compte() -> None:
+    """Compte actif seulement : le contexte du réveil (non lus, agendas, tâches) est préparé au
+    démarrage, puis rafraîchi toutes les veille.RAFRAICHIR_MINUTES, pour que Joi se réveille sans
+    attendre Graph (4 à 6 s en série). Quand aucune conversation n'est ouverte, les nouveaux courriels
+    sont aussi notés au journal, sans annonce, comme le faisait le réveil : ils figurent parmi les non
+    lus du contexte. Pendant une conversation, c'est _veiller_courriels qui les prend et les annonce."""
+    from .compte import veille
+
+    await veille.instance().preparer()
+    while True:
+        await asyncio.sleep(veille.RAFRAICHIR_MINUTES * 60)
+        if not _conversations:
+            await veille.instance().verifier()
+        veille.instance().rafraichir_en_fond()  # pas deux rafraîchissements à la fois
+        await veille.instance().attendre_rafraichissement()
 
 
 async def _prechauffer_voix() -> None:
@@ -239,6 +260,7 @@ async def cycle_de_vie(_app: FastAPI):
                     "Joi démarre sans compte.", config.JOI_COMPTE_REFUSE)
     if config.JOI_COMPTE:
         _en_fond(_veiller_courriels())
+        _en_fond(_tenir_contexte_compte())
     yield
     await arreter_client_partage()
 
@@ -549,6 +571,11 @@ class Conversation:
             await self.cerveau.arreter()
             # La conversation est finie : Joi range ses souvenirs (et transcrit l'écoute, s'il y en a une).
             lancer_consolidation()
+            if config.JOI_COMPTE:
+                from .compte import veille
+
+                # Ce que Joi a fait sur son compte pendant la conversation : le prochain réveil le saura.
+                veille.instance().rafraichir_en_fond()
 
     async def traiter_commande(self, brut: str) -> None:
         commande = json.loads(brut)

@@ -212,7 +212,9 @@ En conversation, elle peut :
   acceptée, ton agenda te le rappelle sur ton téléphone. Elle peut le déplacer ou l'annuler ;
 - tenir une liste de choses à faire sans heure (la liste « Joi » de Microsoft To Do).
 
-Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches. Pendant la
+Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches : ce contexte
+est préparé au démarrage et rafraîchi toutes les 5 minutes (quand personne n'est là, les nouveaux
+courriels sont alors notés sans annonce), pour qu'elle se réveille sans attendre Microsoft. Pendant la
 conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
 ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
 « Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que
