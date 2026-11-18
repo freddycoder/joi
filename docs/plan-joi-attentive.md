@@ -348,3 +348,59 @@ les engagements attendus et rien d'autre.
 - L'index SQLite FTS5 : toujours pas nécessaire (77 Ko de mémoire, recherche en 0,4 s).
 - Un tour de chauffe au réveil : hypothèse sans preuve ; à voir après la partie 5.
 - Le moteur Claude (Agent SDK) : idée discutée, non décidée.
+
+---
+
+## État au 2026-11-18 (fin de la session 1)
+
+Les parties 1 à 4 sont codées sur la branche `joi-attentive`, en 6 commits, avec 200 tests (158 au
+départ ; `.venv\Scripts\python -m pytest`, une dizaine de secondes, jamais `donnees/`). La PR attend
+la session 2 (parties 5 et 6), ou plus tôt si l'utilisateur le veut.
+
+Vérifié pendant la session :
+- Copilot SDK : `ASSISTANT_MESSAGE_START` existe et chaque `ASSISTANT_MESSAGE_DELTA` porte un
+  `message_id`. Aucune API publique ne fait entrer un message dans l'historique sans lancer un tour :
+  `send` en lance toujours un ; `rpc.send_messages` ajoute plusieurs messages avant un tour unique, mais
+  il est expérimental et son champ `source` est interne.
+- `transcription._verrou` couvre la transcription et `consolider_ecoute` ; `memoire._verrou_consolidation`
+  couvre aussi la consolidation d'une conversation, sans écoute.
+- Un segment de moins de 5 phrases non marqué « consolidé » est repris par la passe suivante
+  (`transcription.consolider` relit tous les segments « transcrit »).
+- `voix-journee.json` : `affectations` {segment: {groupe: voix du jour}}, `bilans[-1].voix[].classe`.
+
+Écarts au plan :
+- Partie 1 : le changement de message est repéré par le `message_id` des deltas plutôt que par
+  `ASSISTANT_MESSAGE_START` (un message sans texte, un appel d'outil seul, ne compte pas). Le texte
+  écrit avant un outil part aussi avant la phrase d'attente. Les tests sont dans `tests/test_texte.py`.
+- Partie 2 : faute d'API pour un message système silencieux, la note (repli prévu par le plan) part
+  devant le tour suivant de la personne. Seuls ses mots comptent pour confirmer un courriel. La note
+  dit le **nombre** de courriels pas encore annoncés, jamais leur expéditeur ni leur sujet : une revue
+  de sécurité a relevé que du texte de tiers entrait sinon dans un message de la personne. Joi les lit
+  avec `courriels_recents`. La note « apprentissage en cours » suit le verrou de la transcription
+  seulement, part une fois, puis est démentie (« apprentissage fini ») quand c'est fini avant l'annonce.
+  Elle vaut aussi pour des courriels reçus pendant une conversation.
+- Partie 3 : `condenser` reprend aussi `index.md` et tous les fichiers de plus de 6 Ko (pas seulement le
+  projet principal). Elle refuse de partir si Joi répond sur son port ou si le commit « Avant » échoue,
+  et continue après un fichier en échec. La bibliothécaire reçoit l'adresse de la personne (réglage
+  `JOI_COURRIEL_PROPRIETAIRE`, avec le compte) et ne relève plus d'adresses dans la mémoire, puisqu'une
+  adresse lue peut venir d'un tiers. Elle note seulement le nom complet. `tests/conftest.py` efface les
+  objets git en lecture seule (Windows).
+- Partie 4 : la ligne « Latence » dit, après une phrase d'attente, quand le son de la **vraie réponse**
+  est parti (la « 1re phrase après l'outil » se confondait avec la 1re phrase). La médiane du
+  monitoring écarte aussi les consultations du compte. Le coût est gardé par segment dans le manifeste
+  (`cout`) ; un segment plus ancien est estimé d'après sa durée.
+
+Mesures (avant → après) :
+- Prompt système de Joi : +809 octets (`personnalite.md` +597, `compte/personnalite.md` +212).
+  Consignes de la bibliothécaire : +993 octets (dont 201 dans la consigne d'écoute).
+- Voix du jour (`voix_du_jour`, lecture seule) : le 12 « — » (avant : étiquettes A à E), le 16 « 24 »
+  (avant : 170 ; le plan attendait environ 23), le 17 « 20 » (avant : 145). Le 13, reconsolidé, a lui aussi
+  son fichier : 19.
+
+Restent à l'utilisateur : parler à Joi (un récit de journée de moins de 60 mots qui propose d'en dire
+plus ; « qu'as-tu entendu ce matin ? » juste après une écoute ; un courriel reçu pendant l'écoute) ;
+lancer `python -m joi.memoire condenser`, Joi arrêtée, puis relire le `git diff` qu'elle affiche ;
+relancer `/proposer-ameliorations` après une semaine.
+Reste à coder : parties 5 (réveil) et 6 (engagements), session 2. Piste notée : `compte.modele.externe()`
+n'échappe pas la balise de fin si un courriel la contient (relevé par la revue de sécurité ; code
+antérieur, hors de ce plan).
