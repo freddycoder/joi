@@ -35,7 +35,7 @@ class FauxCerveau:
         self.phrases = phrases
         self.envoi = self.premier_token = None
 
-    async def repondre(self, texte, systeme=False):
+    async def repondre(self, texte, systeme=False, note=None):
         self.envoi, self.premier_token = time.monotonic(), None
         for attente, phrase in self.phrases:
             await asyncio.sleep(attente)
@@ -237,7 +237,7 @@ def test_phrase_d_attente_hors_du_journal_meme_si_le_cerveau_la_redit(fausse_voi
     monkeypatch.setattr(serveur, "PHRASES_DE_RECHERCHE", ["Laisse-moi me rappeler…"])
 
     class CerveauQuiCherche(FauxCerveau):
-        async def repondre(self, texte, systeme=False):
+        async def repondre(self, texte, systeme=False, note=None):
             self.envoi = self.premier_token = time.monotonic()
             yield cerveau.RECHERCHE("chat")
             yield "Laisse-moi me rappeler…"  # la même phrase, dite par le cerveau cette fois

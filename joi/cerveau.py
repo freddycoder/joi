@@ -223,12 +223,15 @@ class Cerveau:
         elif genre == SessionEventType.SESSION_ERROR:
             file.put_nowait(RuntimeError(evenement.data.message))
 
-    async def repondre(self, texte: str, systeme: bool = False) -> AsyncIterator[str]:
+    async def repondre(self, texte: str, systeme: bool = False, note: str | None = None) -> AsyncIterator[str]:
         """Envoie ce que la personne a dit et produit la réponse de Joi, phrase par phrase.
 
         Quand Joi fouille sa mémoire, un marqueur RECHERCHE (isinstance) est produit entre les phrases ;
         quand elle consulte son compte, un marqueur CONSULTATION.
-        systeme : le message ne vient pas de la personne (un courriel reçu, glissé par le serveur)."""
+        systeme : le message ne vient pas de la personne (un courriel reçu, glissé par le serveur).
+        note : ce que Joi doit savoir avant de répondre (glissé par le serveur), envoyé devant les mots
+        de la personne. Le SDK n'a pas de moyen public d'ajouter un message à l'historique sans lancer
+        un tour du modèle : la note voyage donc avec le tour suivant."""
         self._file = asyncio.Queue()
         self._inactif.clear()
         self.envoi, self.premier_token = time.monotonic(), None
@@ -238,8 +241,9 @@ class Cerveau:
         else:
             if self._compte:
                 # Ton tour de parole : c'est lui qui peut confirmer l'envoi d'un courriel.
+                # Ses mots seulement : jamais la note, qui peut citer un courriel.
                 self._compte.noter_tour(texte)
-            await self._session.send(texte)
+            await self._session.send(f"{note}\n\n{texte}" if note else texte)
         tampon = ""
         premiere = True  # rien n'est encore sorti : la première phrase peut être coupée plus tôt
         try:

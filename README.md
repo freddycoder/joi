@@ -114,7 +114,8 @@ continue. Au retour, il ne reste que la fin à traiter. `JOI_APPRENDRE_MINUTES=0
 Si Joi est arrêtée en cours de route, la suite est reprise au prochain démarrage.
 Quand tout est appris, Joi te dit d'elle-même qu'elle peut te parler de ta journée. Demande-lui alors
 « qu'as-tu entendu aujourd'hui ? » : une journée nommée (« aujourd'hui », « hier », « 16 novembre »)
-lui donne le résumé complet de cette journée.
+lui donne le résumé complet de cette journée. Si tu lui parles avant, elle sait que l'apprentissage
+n'est pas fini : elle cherche ce qui est déjà appris et dit ce qui manque encore, sans l'inventer.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
 Garde l'onglet ouvert et branche le portable.
@@ -213,7 +214,8 @@ Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne
 conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
 ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
 « Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que
-j'écoutais… »). Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
+j'écoutais… ») ; elle les connaît dès ta première phrase, même si l'annonce attend encore, et peut
+donc répondre juste à « as-tu reçu des courriels ? ». Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
 résumé, et la bibliothécaire en retient ce qui te concerne.
 
 **Comment c'est branché.** Les outils vivent dans un serveur MCP local (`python -m joi.compte`, en stdio)

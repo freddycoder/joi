@@ -40,6 +40,13 @@ Copilot par un serveur MCP. Ici, la veille vérifie les nouveaux courriels toute
 JOI_COURRIEL_VERIFIER_MINUTES et les glisse dans la conversation, sous forme de message système,
 quand Joi est inactive depuis 10 s (en mode écoute : au retour). Sans compte, rien de tout ça.
 
+Avant l'annonce, Joi connaît déjà ces courriels : ils partent, en note, devant le tour suivant de la
+personne (« as-tu reçu des courriels ? » juste au retour de l'écoute). De même, si l'écoute est encore
+en train d'être apprise, une note le lui dit une fois, pour qu'elle n'invente rien sur ce qu'elle a
+entendu. Le SDK n'a pas de moyen public d'ajouter un message à l'historique sans faire répondre le
+modèle : la note voyage donc avec le tour de la personne, et seuls ses mots comptent pour confirmer
+un courriel.
+
 Les deux modes :
   conversation   l'audio part en streaming vers AssemblyAI, Joi répond (mode au réveil)
   ecoute         Joi se tait : la session AssemblyAI est fermée (on ne paie pas) et l'audio est
@@ -428,6 +435,11 @@ class Conversation:
         # Compte de Joi : les courriels à annoncer (courriel, arrivé pendant l'écoute), et le dernier
         # signe de vie de la conversation (pour annoncer seulement quand Joi est inactive).
         self._courriels: list[tuple] = []
+        # Les mêmes courriels, que Joi doit connaître dès le prochain tour de la personne, même si
+        # l'annonce attend encore (« as-tu reçu des courriels ? » juste au retour de l'écoute).
+        self._courriels_a_glisser: list[tuple] = []
+        # Joi a été prévenue qu'un apprentissage d'écoute est en cours (une fois par apprentissage).
+        self._apprentissage_signale = False
         self._derniere_activite = time.monotonic()
         # Les journées dont une écoute vient d'être apprise : Joi le sait (et peut le dire) dès qu'elle
         # est inactive et que l'apprentissage est fini.
@@ -702,6 +714,9 @@ class Conversation:
             # L'écoute est finie : Joi l'apprend en fond pendant que la conversation reprend.
             _en_fond(transcription.apprendre())
         self.mode = "conversation"
+        # Une nouvelle écoute à apprendre : Joi doit en être prévenue de nouveau, même si elle l'a été
+        # pour la précédente.
+        self._apprentissage_signale = False
         await self.envoyer(type="etat", etat="eveil")
         # Une nouvelle session AssemblyAI recommence la numérotation des tours : nouvelles oreilles.
         self.oreilles = self._nouvelles_oreilles()
@@ -936,7 +951,9 @@ class Conversation:
                 await dire(random.choice(phrases), attente=True)
 
         try:
-            async for morceau in self.cerveau.repondre(texte, systeme=systeme):
+            # La note est prise au dernier moment : ce qu'elle retire de la file part avec ce tour.
+            note = None if systeme else self._note_pour_le_tour()
+            async for morceau in self.cerveau.repondre(texte, systeme=systeme, note=note):
                 if mesure:
                     mesure.envoi, mesure.premier_token = self.cerveau.envoi, self.cerveau.premier_token
                 if isinstance(morceau, RECHERCHE):
@@ -1001,7 +1018,50 @@ class Conversation:
     def recevoir_courriels(self, courriels: list) -> None:
         """De nouveaux courriels pertinents : annoncés dès que Joi est inactive (en mode écoute : au
         retour en conversation, en signalant qu'ils sont arrivés pendant l'écoute)."""
-        self._courriels += [(c, self.mode == "ecoute") for c in courriels]
+        nouveaux = [(c, self.mode == "ecoute") for c in courriels]
+        self._courriels += nouveaux
+        self._courriels_a_glisser += nouveaux
+
+    def _prendre_courriels_a_annoncer(self) -> list[tuple]:
+        """Le lot à annoncer : le message d'annonce les présente à Joi, plus besoin de les glisser."""
+        lot, self._courriels, self._courriels_a_glisser = self._courriels, [], []
+        return lot
+
+    def _note_pour_le_tour(self) -> str | None:
+        """Ce que Joi doit savoir avant de répondre au tour de la personne, pour ne pas inventer ce
+        qui s'est passé pendant l'écoute : un apprentissage pas fini, des courriels pas encore
+        annoncés. Chaque chose une seule fois ; None s'il n'y a rien."""
+        morceaux = []
+        # Le verrou de la transcription seulement : il couvre l'écoute (transcription puis
+        # consolidation), pas la consolidation d'une conversation, qui n'a rien à voir avec l'écoute.
+        if transcription._verrou.locked():
+            if not self._apprentissage_signale:
+                self._apprentissage_signale = True
+                morceaux.append(
+                    "[apprentissage en cours] Tu n'as pas fini d'apprendre ce que tu as entendu en "
+                    "écoutant. Si on te le demande, cherche quand même avec se_souvenir (une partie est "
+                    "peut-être déjà apprise) et dis ce qui manque encore, sans l'inventer.")
+        elif self._apprentissage_signale:
+            # La note précédente est restée dans l'historique : la démentir, sinon Joi répondrait
+            # « pas encore appris » jusqu'à l'annonce, qui attend 10 s de silence.
+            self._apprentissage_signale = False
+            morceaux.append(
+                "[apprentissage fini] Tu as fini d'apprendre ce que tu as entendu : pour en parler, "
+                "cherche avec se_souvenir en nommant la journée.")
+        if self._courriels_a_glisser:
+            from .compte.modele import externe, ligne_courriel
+
+            lot, self._courriels_a_glisser = self._courriels_a_glisser, []
+            quand = ("pendant que tu écoutais en silence" if any(p for _, p in lot)
+                     else "pendant que vous parliez")
+            morceaux.append(
+                f"[courriels reçus {quand}, pas encore annoncés]\n"
+                + externe("\n".join(f"- {ligne_courriel(c)}" for c, _ in lot)) + "\n"
+                "Parles-en seulement si on te demande tes courriels.")
+        if not morceaux:
+            return None
+        return ("\n\n".join(morceaux)
+                + "\n\nCes notes ne viennent pas de la personne. Voici ce qu'elle vient de dire :")
 
     def _inactive(self) -> bool:
         maintenant = time.monotonic()
@@ -1031,11 +1091,12 @@ class Conversation:
             if not self._inactive():
                 continue
             if self._courriels:
-                lot, self._courriels = self._courriels, []
+                lot = self._prendre_courriels_a_annoncer()
                 log.info("Annonce possible de %d courriel(s) : Joi juge s'ils sont utiles.", len(lot))
                 self.tache_reponse = asyncio.create_task(self.repondre(_message_courriels(lot), systeme=True))
             elif self._journees_apprises and not _apprentissage_en_cours():
                 jours, self._journees_apprises = sorted(self._journees_apprises), set()
+                self._apprentissage_signale = False  # l'annonce dit elle-même que c'est appris
                 log.info("Mémoire : écoute du %s apprise, Joi le sait.", ", ".join(jours))
                 self.tache_reponse = asyncio.create_task(self.repondre(_message_journees(jours), systeme=True))
 
