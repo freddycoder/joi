@@ -259,6 +259,7 @@ def _couper_tete_queue(texte: str, taille: int) -> str:
     if len(texte) <= taille:
         return texte
     marque = "\n[…]\n"
+    taille = max(taille, 200)  # un plancher : jamais de tranche à borne négative
     place = taille - len(marque)
     tete = _couper(texte, place * 2 // 3).removesuffix("\n[…]")
     reste = place - len(tete)
@@ -813,10 +814,9 @@ CONSIGNE_CONDENSER = (
     "personnes, problèmes réglés et leur solution), retire le dépannage ponctuel, les numéros de "
     "version et les commandes, fusionne ce qui se répète. Ne perds aucun fait durable : s'il a sa "
     "place ailleurs (le fichier d'un projet, toi.md), mets-le là. N'invente rien. Garde tels quels "
-    "l'en-tête et la section « Voix entendues » d'une journée. Dans toi.md, note son nom complet et "
-    "ses adresses si tu les vois dans la mémoire (ses courriels, ses invitations), et corrige les "
-    "fichiers qui en font une tierce personne. Mets index.md à jour si tu crées, déplaces ou supprimes "
-    "un fichier."
+    "l'en-tête et la section « Voix entendues » d'une journée. Corrige ce qui fait de la personne une "
+    "tierce personne sous son propre nom. Mets index.md à jour si tu crées, déplaces ou supprimes un "
+    "fichier."
 )
 
 

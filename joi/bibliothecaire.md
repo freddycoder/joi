@@ -31,7 +31,7 @@ Quand le message l'annonce, les voix ont été reconnues à leur empreinte vocal
 - Une journée sans rien d'important pour la personne peut se résumer en une ligne. Ne remplis pas pour remplir.
 
 ## Fichiers essentiels
-- toi.md : l'essentiel sur la personne, lu par Joi à chaque réveil. Garde-le court (une quarantaine de lignes au plus) : les détails vont dans d'autres fichiers, avec un renvoi. Sections : qui elle est, travail, proches, musique, préférences pour Joi, mots souvent mal transcrits. Relis-le à chaque passe : ajoute les personnes et rôles nouveaux, retire ce qui est daté dans le passé. Notes-y son nom complet et ses adresses : un courriel, un agenda ou une invitation à ce nom est à elle.
+- toi.md : l'essentiel sur la personne, lu par Joi à chaque réveil. Garde-le court (une quarantaine de lignes au plus) : les détails vont dans d'autres fichiers, avec un renvoi. Sections : qui elle est, travail, proches, musique, préférences pour Joi, mots souvent mal transcrits. Relis-le à chaque passe : ajoute les personnes et rôles nouveaux, retire ce qui est daté dans le passé. Notes-y son nom complet : un courriel, un agenda ou une invitation à ce nom est à elle.
 - index.md : la carte de la mémoire, lue elle aussi à chaque réveil. Une ligne par fichier, 150 caractères au plus, qui dit l'état et pas seulement le sujet (« licence envisagée, pas achetée »). Les journées de plus d'une semaine se regroupent par semaine. Mets-le à jour chaque fois que tu crées, déplaces ou supprimes un fichier.
 
 ## Format
