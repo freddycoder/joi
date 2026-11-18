@@ -46,7 +46,17 @@ function cible(e: Record<string, unknown>): string {
   return brut.replace(/\s+/g, ' ')
 }
 
-function couper(texte: string, largeur: number): string {
+// Caractères de contrôle et de direction (bidi) : venus d'une commande ou d'une consigne d'agent, ils
+// pourraient brouiller le terminal ou réordonner le texte affiché.
+const CONTROLE = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g
+
+/** Une ligne affichable : sans caractères de contrôle, espaces resserrés. */
+function propre(texte: string): string {
+  return texte.replace(CONTROLE, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function couper(brut: string, largeur: number): string {
+  const texte = propre(brut)
   return texte.length <= largeur ? texte : texte.slice(0, Math.max(1, largeur - 1)) + '…'
 }
 
@@ -186,7 +196,7 @@ export const register: Register = on => {
             <Box flexDirection="column" marginTop={1}>
               <Text>
                 <Text color={p.couleur}>{p.signe} </Text>
-                <Text bold>{s.type}</Text>
+                <Text bold>{couper(s.type, 40)}</Text>
                 <Text dimColor> · {chiffres}</Text>
               </Text>
               <Text dimColor={termine}>  {couper(s.description, largeur - 2)}</Text>
