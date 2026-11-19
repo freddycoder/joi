@@ -50,9 +50,13 @@ JOI_SEGMENT_MINUTES = float(os.getenv("JOI_SEGMENT_MINUTES", "30"))
 # d'audio est enregistré (en minutes, compté en segments terminés). 0 = seulement en fin d'écoute.
 JOI_APPRENDRE_MINUTES = float(os.getenv("JOI_APPRENDRE_MINUTES", "60") or 0)
 # Mode écoute : modèle(s) de la transcription différée, par ordre de préférence (séparés par des virgules).
+# universal-3-5-pro est déprécié depuis le 2026-11-17 (remplaçant : assemblyai-stt-3-7, même prix) ;
+# il reste en secours tant qu'AssemblyAI n'a pas annoncé son retrait.
+_MODELES_DIFFERES_DEFAUT = "assemblyai-stt-3-7,universal-3-5-pro"
 ASSEMBLYAI_MODELES_DIFFERES = [
-    m.strip() for m in os.getenv("ASSEMBLYAI_MODELES_DIFFERES", "universal-3-5-pro").split(",") if m.strip()
-] or ["universal-3-5-pro"]
+    m.strip() for m in (os.getenv("ASSEMBLYAI_MODELES_DIFFERES", "").strip() or _MODELES_DIFFERES_DEFAUT).split(",")
+    if m.strip()
+] or _MODELES_DIFFERES_DEFAUT.split(",")
 # Mode écoute : garder l'audio après sa transcription (par défaut, il est supprimé pour la vie privée).
 JOI_GARDER_AUDIO = os.getenv("JOI_GARDER_AUDIO", "non").strip().lower() in ("oui", "o", "vrai", "true", "1", "yes")
 # Commandes vocales « Joi, écoute seulement » et « Joi, reviens » (la seconde télécharge un modèle Vosk).

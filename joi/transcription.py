@@ -53,8 +53,9 @@ log = logging.getLogger("joi.transcription")
 URL_API = "https://api.assemblyai.com/v2"
 LANGUE = "fr"
 
-# Prix en dollars US par heure d'audio, relevés sur assemblyai.com/pricing le 2026-11-12.
-PRIX_HEURE = {"universal-3-5-pro": 0.21, "universal-2": 0.15}
+# Prix en dollars US par heure d'audio, relevés sur assemblyai.com/pricing le 2026-11-12
+# (assemblyai-stt-3-7 le 2026-11-19).
+PRIX_HEURE = {"assemblyai-stt-3-7": 0.21, "universal-3-5-pro": 0.21, "universal-2": 0.15}
 PRIX_VOIX_HEURE = 0.02  # speaker_labels, en différé
 
 TRANSCRIPTIONS_SIMULTANEES = 3
