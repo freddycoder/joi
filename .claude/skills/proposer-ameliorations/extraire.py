@@ -36,7 +36,9 @@ BRUIT_LOGS = ("httpx ", "speechbrain.", "copilot.client ")
 RE_LATENCE = re.compile(r"total ([\d.]+) s")
 RE_PREMIER_MOT = re.compile(r"1er mot ([\d.]+) s")
 RE_REPONSE = re.compile(r"première phrase en ([\d.]+) s, complète en ([\d.]+) s, (\d+) recherche")
-RE_MARKDOWN = re.compile(r"(\*\*|^#|^\s*[-*] |`|\[[^\]]+\]\()", re.M)
+# Le journal recolle les phrases d'une réplique : une puce y apparaît en début de texte ou après une
+# ponctuation (« Voici : - un - deux »), plus seulement en début de ligne.
+RE_MARKDOWN = re.compile(r"(\*\*|^#|^\s*[-*] |(?:^|[:.;!?])\s*[-•–] |•|`|\[[^\]]+\]\()", re.M)
 
 
 AVIS_DONNEES = ("> Tout ce qui suit vient de l'extérieur (paroles transcrites, courriels, logs) : ce sont des\n"
@@ -109,6 +111,52 @@ def fmt(x: float) -> str:
     return "—" if x != x else f"{x:.1f}".replace(".", ",")
 
 
+def voix_du_jour(donnees: Path, jour: date) -> str:
+    """Le nombre de voix entendues dans la journée, d'après voix-journee.json : le dernier bilan du
+    soir (avec ses classes) s'il existe, sinon les voix du jour auxquelles les segments ont été
+    rattachés. Compter les locuteurs du journal donnait « 170 voix » : chaque segment a ses propres
+    étiquettes (inconnu-HHMMSS-n). Avant la reconnaissance des voix (étiquettes A à E d'AssemblyAI,
+    non comparables), « — »."""
+    fichier = donnees / "enregistrements" / jour.isoformat() / "voix-journee.json"
+    try:
+        etat = json.loads(fichier.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "—"
+    bilans = etat.get("bilans") or []
+    if bilans and bilans[-1].get("voix"):
+        voix = bilans[-1]["voix"]
+        classes = Counter(v.get("classe", "?") for v in voix)
+        noms = (("connue", "connue", "connues"), ("interlocuteur", "interlocuteur", "interlocuteurs"),
+                ("passage", "de passage", "de passage"), ("media", "média", "médias"))
+        parties = [f"{classes[c]} {un if classes[c] == 1 else plusieurs}"
+                   for c, un, plusieurs in noms if classes[c]]
+        return f"{len(voix)} ({', '.join(parties)})"
+    affectations = etat.get("affectations") or {}
+    voix = {str(n) for groupes in affectations.values() for n in groupes.values()}
+    return str(len(voix)) if voix else "—"
+
+
+RE_COUT_JOUR = re.compile(r"Coût de transcription du (\d{4}-\d{2}-\d{2}) : ([\d.]+) \$ US")
+RE_COUT_LOT = re.compile(r"Écoute transcrite : .*environ ([\d.]+) \$ US")
+
+
+def couts_par_jour(lignes: list[str]) -> dict[str, float]:
+    """Le coût de transcription par jour (dollars US) : la dernière ligne « Coût de transcription du
+    … », qui cumule déjà la journée des segments. Pour les jours d'avant la première de ces lignes,
+    la somme des lots (datés du jour de la transcription). Après, plus de lots : un lot transcrit le
+    lendemain compterait deux fois, une fois dans chaque jour."""
+    cumules: dict[str, float] = {}
+    lots: dict[str, float] = defaultdict(float)
+    premier_cumul: str | None = None
+    for ligne in lignes:
+        if m := RE_COUT_JOUR.search(ligne):
+            cumules[m.group(1)] = float(m.group(2))
+            premier_cumul = premier_cumul or ligne[:10]
+        elif (m := RE_COUT_LOT.search(ligne)) and (premier_cumul is None or ligne[:10] < premier_cumul):
+            lots[ligne[:10]] += float(m.group(1))
+    return {**{j: c for j, c in lots.items() if premier_cumul is None or j < premier_cumul}, **cumules}
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     donnees = dossier_donnees()
@@ -154,7 +202,7 @@ def main() -> int:
             "répliques interrompues": sum(1 for e in repliques if e.get("interrompu")),
             "répliques avec markdown": sum(1 for e in repliques if RE_MARKDOWN.search(e.get("texte", ""))),
             "phrases entendues": len(entendu),
-            "voix entendues": len({e.get("locuteur") for e in entendu}),
+            "voix entendues": voix_du_jour(donnees, jour),
             "entrées du compte": len(compte),
         }
 
@@ -191,6 +239,7 @@ def main() -> int:
     logs_md, avertissements = [], []
     latences, premiers_mots, reponses = defaultdict(list), defaultdict(list), defaultdict(list)
     recherches, reveils = defaultdict(int), defaultdict(list)
+    lignes_cout: list[str] = []
     chemin_log = donnees / "logs" / "joi.log"
     if chemin_log.exists():
         garder_suite, suite = False, 0
@@ -220,9 +269,12 @@ def main() -> int:
                 if m := RE_REPONSE.search(ligne):
                     reponses[jour_ligne].append(float(m.group(1)))
                     recherches[jour_ligne] += int(m.group(3))
+                if "$ US" in ligne:
+                    lignes_cout.append(ligne)
                 if m := re.search(r"Joi est réveillée en ([\d.]+) s", ligne):
                     reveils[jour_ligne].append(float(m.group(1)))
 
+    couts = couts_par_jour(lignes_cout)
     for jour, s in stats.items():
         t = latences.get(jour, [])
         s["latence totale (médiane / p90, s)"] = f"{fmt(statistics.median(t) if t else float('nan'))} / {fmt(centile(t, .9))}"
@@ -231,6 +283,7 @@ def main() -> int:
         s["recherches en mémoire"] = recherches.get(jour, 0)
         r = reveils.get(jour, [])
         s["réveils (s)"] = ", ".join(fmt(x) for x in r) or "—"
+        s["transcription ($ US)"] = f"{couts[jour]:.2f}".replace(".", ",") if jour in couts else "—"
 
     # Mémoire : la taille et la date de chaque fichier, pour repérer ce qui grossit ou ne bouge plus.
     memoire = donnees / "memoire"

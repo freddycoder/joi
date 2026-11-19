@@ -22,14 +22,19 @@ URL_TTS_ASSEMBLYAI = "https://tts.us.assemblyai.com/v1/speech"
 
 EMOJIS = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍]")
 MARKDOWN = re.compile(r"[*_#`>|~]+")
+# Une puce de liste : un tiret ou un point en début de ligne, après une ponctuation ou entre deux
+# espaces, et suivi d'une espace. Les traits d'union (« peut-être », « dis-moi ») et le signe
+# moins (« -5 ») ne sont pas suivis d'une espace : ils restent. Le point « • » part toujours.
+PUCES = re.compile(r"(^|[\s:.;!?])[-–](?=\s)|•", re.M)
 
 _client: httpx.AsyncClient | None = None
 
 
 def nettoyer(texte: str) -> str:
-    """Retire ce qui ne se prononce pas (emojis, symboles markdown)."""
+    """Retire ce qui ne se prononce pas (emojis, symboles markdown, puces de liste)."""
     texte = EMOJIS.sub("", texte)
     texte = MARKDOWN.sub("", texte)
+    texte = PUCES.sub(r"\1", texte)
     return re.sub(r"\s+", " ", texte).strip()
 
 

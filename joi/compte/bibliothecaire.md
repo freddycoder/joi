@@ -1,5 +1,5 @@
 ## Le compte de Joi
-Joi a sa propre adresse courriel, un agenda et une liste de tâches. Les échanges peuvent contenir ces lignes, en résumé :
+Joi a sa propre adresse courriel, un agenda et une liste de tâches. L'adresse de la personne est {adresse_toi} : ce qui est à cette adresse ou à son nom est à elle. Les échanges peuvent contenir ces lignes, en résumé :
 - « [courriel reçu] » et « [courriel envoyé] » : un courriel arrivé dans la boîte de Joi, ou écrit par Joi (à la demande de la personne). Seuls l'expéditeur, le sujet et un aperçu sont donnés.
 - « [agenda] » : un événement créé, modifié ou annulé dans l'agenda de Joi (souvent un rappel pour la personne).
 - « [tâche] » : une chose à faire ajoutée à la liste de Joi, ou terminée.

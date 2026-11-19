@@ -53,7 +53,8 @@ derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'holog
 **Latence.** Chaque réponse ajoute une ligne « Latence : » au journal technique, et le bloc « Latence » du
 monitoring montre la dernière réponse et la médiane : fin de tour (AssemblyAI décide que tu as fini de
 parler), cerveau (premier mot, première phrase), synthèse de la voix, début de la lecture, et le total de
-la fin de ta phrase au premier son. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
+la fin de ta phrase au premier son. La ligne dit aussi le modèle (« défaut » sans `JOI_MODELE`), les
+recherches et consultations du compte, et, après une phrase d'attente, quand la vraie réponse s'est fait entendre. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
 `JOI_FIN_TOUR_SILENCE_MIN_MS` / `_MAX_MS` dans `.env` (vides : les valeurs d'AssemblyAI). Pour comparer
 les modèles Copilot, sans micro : `.venv\Scripts\python -m joi.banc MODELE1 MODELE2` (chaque phrase
 consomme une requête Copilot ; `--lister`, `--phrases N`). Il ne change pas `JOI_MODELE`.
@@ -114,7 +115,8 @@ continue. Au retour, il ne reste que la fin à traiter. `JOI_APPRENDRE_MINUTES=0
 Si Joi est arrêtée en cours de route, la suite est reprise au prochain démarrage.
 Quand tout est appris, Joi te dit d'elle-même qu'elle peut te parler de ta journée. Demande-lui alors
 « qu'as-tu entendu aujourd'hui ? » : une journée nommée (« aujourd'hui », « hier », « 16 novembre »)
-lui donne le résumé complet de cette journée.
+lui donne le résumé complet de cette journée. Si tu lui parles avant, elle sait que l'apprentissage
+n'est pas fini : elle cherche ce qui est déjà appris et dit ce qui manque encore, sans l'inventer.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
 Garde l'onglet ouvert et branche le portable.
@@ -183,7 +185,8 @@ Le rejeu n'écrit ni dans le journal ni dans la mémoire ; il garde les empreint
 
 **Coûts.** Le streaming n'est pas utilisé en écoute : on ne paie que la transcription différée,
 environ 0,23 $ US de l'heure (modèle Pro et séparation des voix). Une journée de 8 h revient à moins de 2 $.
-La console affiche les heures transcrites et une estimation du coût après chaque écoute.
+La console affiche les heures transcrites et une estimation du coût après chaque écoute, puis le cumul
+du jour (« Coût de transcription du … »), repris par la révision des données.
 
 **Vie privée.** Les personnes autour (collègues, clients) devraient savoir qu'elles sont enregistrées.
 L'audio passe par AssemblyAI, puis le texte par Copilot. Pour limiter l'exposition :
@@ -207,13 +210,20 @@ En conversation, elle peut :
 - lire son agenda et le tien (partagé avec elle en lecture) : « qu'est-ce que j'ai demain ? » ;
 - créer un rappel : un événement dans son agenda, avec une invitation à ton adresse. Une fois l'invitation
   acceptée, ton agenda te le rappelle sur ton téléphone. Elle peut le déplacer ou l'annuler ;
-- tenir une liste de choses à faire sans heure (la liste « Joi » de Microsoft To Do).
+- tenir une liste de choses à faire sans heure (la liste « Joi » de Microsoft To Do) ;
+- te proposer, au réveil, ce que tu as dit pendant l'écoute que tu ferais (« hier tu as dit que tu
+  essaierais le CRM aujourd'hui, je t'en fais une tâche ? »). Seules tes phrases à toi (ta voix
+  reconnue) comptent ; chaque engagement est proposé une fois, et seul ton oui en fait une tâche, jamais
+  un courriel ni une invitation. Les propositions sont dans `donnees/compte/propositions.json`.
 
-Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches. Pendant la
+Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches : ce contexte
+est préparé au démarrage et rafraîchi toutes les 5 minutes (quand personne n'est là, les nouveaux
+courriels sont alors notés sans annonce), pour qu'elle se réveille sans attendre Microsoft. Pendant la
 conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
 ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
 « Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que
-j'écoutais… »). Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
+j'écoutais… ») ; elle sait qu'ils sont arrivés dès ta première phrase, même si l'annonce attend encore,
+et les consulte si tu lui demandes « as-tu reçu des courriels ? ». Chaque courriel reçu ou envoyé, chaque événement et chaque tâche entre au journal, en
 résumé, et la bibliothécaire en retient ce qui te concerne.
 
 **Comment c'est branché.** Les outils vivent dans un serveur MCP local (`python -m joi.compte`, en stdio)
@@ -287,7 +297,8 @@ donnees/
     └── journees/              un résumé par journée d'écoute
 ```
 
-- **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité.
+- **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité (3 500 caractères au plus
+  chacun ; un fichier coupé est signalé au journal technique).
 - **En conversation**, elle peut chercher un détail avec l'outil `se_souvenir`
   (dans ses fichiers, puis dans le journal).
 - **Après une conversation ou une écoute** (et 5 minutes après le démarrage si personne ne lui parle,
@@ -297,7 +308,16 @@ donnees/
 
 Chaque rangement est enregistré dans un dépôt git **local** (sans remote) :
 `git -C donnees/memoire log -p` montre ce qu'elle a retenu, et on peut annuler une passe ratée.
-Tu peux aussi corriger ses fichiers à la main. Pour repartir à zéro, supprime `donnees/memoire/`,
+Tu peux aussi corriger ses fichiers à la main.
+
+Une journée raconte (10 à 15 lignes), un projet garde l'état courant (une puce par sujet, mise à jour
+sur place). Pour resserrer une mémoire écrite avant ces règles, une fois, Joi arrêtée :
+`python -m joi.memoire condenser`. La bibliothécaire reprend les journées de plus de 8 Ko, les autres
+fichiers de plus de 6 Ko, `toi.md` et `index.md`, entre un commit « Avant » et un commit « Après ».
+La commande refuse de partir si Joi tourne ou si l'état d'avant ne peut pas être enregistré, et affiche
+à la fin la commande `git diff` pour relire et la commande `git revert` pour tout annuler.
+
+Pour repartir à zéro, supprime `donnees/memoire/`,
 `donnees/journal/` et `donnees/enregistrements/`.
 
 

@@ -10,6 +10,7 @@ Copilot approuve de lui-même les outils MCP marqués « lecture seule » : seul
 passent par le gestionnaire (vérifié avec le Copilot SDK 1.0.31).
 """
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -18,12 +19,13 @@ from typing import Callable
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from .. import config
-from . import OUTILS, SERVEUR, brouillons, reglages, veille
+from . import OUTILS, OUTILS_ECRITURE, SERVEUR, brouillons, engagements, reglages, veille
 
 log = logging.getLogger("joi.compte")
 
 FICHIER_CONSIGNES = Path(__file__).resolve().parent / "personnalite.md"
 DELAI_OUTIL_MS = 30_000
+AGE_MAX_OUI = 180  # secondes : le oui à une proposition d'engagement doit être tout récent
 
 
 def outil_du_compte(nom: str | None) -> str | None:
@@ -69,6 +71,35 @@ class Integration:
     def noter_tour(self, texte: str) -> None:
         self.confirmation.noter_tour(texte)
 
+    def _verifier_proposition(self, brut) -> str | None:
+        """None si la réponse à un engagement proposé peut passer, sinon la raison du refus. Tout ce qui
+        n'est pas clairement conforme est refusé (arguments illisibles, réponse inconnue)."""
+        arguments = brut
+        if isinstance(brut, str):
+            try:
+                arguments = json.loads(brut)
+            except json.JSONDecodeError:
+                arguments = None
+        if not isinstance(arguments, dict) or arguments.get("reponse") not in ("oui", "non") \
+                or not isinstance(arguments.get("numero"), str):
+            log.warning("marquer_proposition refusé : arguments illisibles.")
+            return "Arguments invalides : un numéro de proposition, et « oui » ou « non »."
+        if arguments["reponse"] == "non":
+            return None  # un refus n'a pas besoin de confirmation : il ne crée rien
+        numero = arguments["numero"].strip().lower().strip("[]")
+        proposition = next((p for p in engagements.lire() if p.get("numero") == numero), None)
+        if proposition is None or proposition.get("etat") != "proposee" or not proposition.get("montree_le"):
+            log.info("Proposition %s : pas une proposition ouverte montrée au réveil, tâche refusée.", numero)
+            return "Ce n'est pas une proposition ouverte de ton réveil : reprends le numéro du réveil."
+        # Un engagement entendu ne devient une tâche que sur un oui de la personne elle-même, à l'instant
+        # (le tour auquel Joi répond, de moins de AGE_MAX_OUI secondes), pas sur un oui d'il y a longtemps.
+        tour = self.confirmation.dernier_tour(AGE_MAX_OUI)
+        if not tour or not engagements.est_oui(tour):
+            log.info("Proposition %s : pas de oui clair, tâche refusée.", numero)
+            return ("La personne n'a pas dit oui clairement : la tâche n'est pas créée. Dis-lui que tu ne "
+                    "l'as pas notée et redemande simplement « je t'en fais une tâche ? ».")
+        return None
+
     def permission(self, requete, invocation):
         if getattr(requete, "kind", None) != "mcp" or getattr(requete, "server_name", None) != SERVEUR:
             return self._repli(requete, invocation)
@@ -82,4 +113,11 @@ class Integration:
                 log.info("Envoi du brouillon %s refusé : %s", arguments.get("brouillon"), raison)
                 return PermissionDecisionReject(feedback=raison)
             log.info("Envoi du brouillon %s confirmé par la personne.", arguments.get("brouillon"))
+        if outil == "marquer_proposition":
+            raison = self._verifier_proposition(requete.args)
+            if raison:
+                return PermissionDecisionReject(feedback=raison)
+        if outil in OUTILS_ECRITURE:
+            # Le contexte du réveil gardé en mémoire ne dit plus vrai (tâche cochée, événement créé).
+            veille.invalider()
         return PermissionDecisionApproveOnce()

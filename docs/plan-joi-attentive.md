@@ -348,3 +348,122 @@ les engagements attendus et rien d'autre.
 - L'index SQLite FTS5 : toujours pas nécessaire (77 Ko de mémoire, recherche en 0,4 s).
 - Un tour de chauffe au réveil : hypothèse sans preuve ; à voir après la partie 5.
 - Le moteur Claude (Agent SDK) : idée discutée, non décidée.
+
+---
+
+## État au 2026-11-18 (fin de la session 1)
+
+Les parties 1 à 4 sont codées sur la branche `joi-attentive`, en 6 commits, avec 200 tests (158 au
+départ ; `.venv\Scripts\python -m pytest`, une dizaine de secondes, jamais `donnees/`). La PR attend
+la session 2 (parties 5 et 6), ou plus tôt si l'utilisateur le veut.
+
+Vérifié pendant la session :
+- Copilot SDK : `ASSISTANT_MESSAGE_START` existe et chaque `ASSISTANT_MESSAGE_DELTA` porte un
+  `message_id`. Aucune API publique ne fait entrer un message dans l'historique sans lancer un tour :
+  `send` en lance toujours un ; `rpc.send_messages` ajoute plusieurs messages avant un tour unique, mais
+  il est expérimental et son champ `source` est interne.
+- `transcription._verrou` couvre la transcription et `consolider_ecoute` ; `memoire._verrou_consolidation`
+  couvre aussi la consolidation d'une conversation, sans écoute.
+- Un segment de moins de 5 phrases non marqué « consolidé » est repris par la passe suivante
+  (`transcription.consolider` relit tous les segments « transcrit »).
+- `voix-journee.json` : `affectations` {segment: {groupe: voix du jour}}, `bilans[-1].voix[].classe`.
+
+Écarts au plan :
+- Partie 1 : le changement de message est repéré par le `message_id` des deltas plutôt que par
+  `ASSISTANT_MESSAGE_START` (un message sans texte, un appel d'outil seul, ne compte pas). Le texte
+  écrit avant un outil part aussi avant la phrase d'attente. Les tests sont dans `tests/test_texte.py`.
+- Partie 2 : faute d'API pour un message système silencieux, la note (repli prévu par le plan) part
+  devant le tour suivant de la personne. Seuls ses mots comptent pour confirmer un courriel. La note
+  dit le **nombre** de courriels pas encore annoncés, jamais leur expéditeur ni leur sujet : une revue
+  de sécurité a relevé que du texte de tiers entrait sinon dans un message de la personne. Joi les lit
+  avec `courriels_recents`. La note « apprentissage en cours » suit le verrou de la transcription
+  seulement, part une fois, puis est démentie (« apprentissage fini ») quand c'est fini avant l'annonce.
+  Elle vaut aussi pour des courriels reçus pendant une conversation.
+- Partie 3 : `condenser` reprend aussi `index.md` et tous les fichiers de plus de 6 Ko (pas seulement le
+  projet principal). Elle refuse de partir si Joi répond sur son port ou si le commit « Avant » échoue,
+  et continue après un fichier en échec. La bibliothécaire reçoit l'adresse de la personne (réglage
+  `JOI_COURRIEL_PROPRIETAIRE`, avec le compte) et ne relève plus d'adresses dans la mémoire, puisqu'une
+  adresse lue peut venir d'un tiers. Elle note seulement le nom complet. `tests/conftest.py` efface les
+  objets git en lecture seule (Windows).
+- Partie 4 : la ligne « Latence » dit, après une phrase d'attente, quand le son de la **vraie réponse**
+  est parti (la « 1re phrase après l'outil » se confondait avec la 1re phrase). La médiane du
+  monitoring écarte aussi les consultations du compte. Le coût est gardé par segment dans le manifeste
+  (`cout`) ; un segment plus ancien est estimé d'après sa durée.
+
+Mesures (avant → après) :
+- Prompt système de Joi : +809 octets (`personnalite.md` +597, `compte/personnalite.md` +212).
+  Consignes de la bibliothécaire : +993 octets (dont 201 dans la consigne d'écoute).
+- Voix du jour (`voix_du_jour`, lecture seule) : le 12 « — » (avant : étiquettes A à E), le 16 « 24 »
+  (avant : 170 ; le plan attendait environ 23), le 17 « 20 » (avant : 145). Le 13, reconsolidé, a lui aussi
+  son fichier : 19.
+
+Restent à l'utilisateur : parler à Joi (un récit de journée de moins de 60 mots qui propose d'en dire
+plus ; « qu'as-tu entendu ce matin ? » juste après une écoute ; un courriel reçu pendant l'écoute) ;
+lancer `python -m joi.memoire condenser`, Joi arrêtée, puis relire le `git diff` qu'elle affiche ;
+relancer `/proposer-ameliorations` après une semaine.
+Reste à coder : parties 5 (réveil) et 6 (engagements), session 2. Piste notée : `compte.modele.externe()`
+n'échappe pas la balise de fin si un courriel la contient (relevé par la revue de sécurité ; code
+antérieur, hors de ce plan).
+
+---
+
+## État au 2026-11-18 (fin de la session 2)
+
+Le plan est entièrement codé. Les parties 5 et 6 sont sur la branche `joi-attentive`, en 2 commits, avec
+233 tests (200 au départ de la session, 158 avant le plan). La PR unique reste à ouvrir, avec l'accord
+de l'utilisateur.
+
+Vérifié pendant la session :
+- `httpx.Client` est sûr entre fils (le pool de httpcore a un verrou), tout comme le cache de jetons
+  MSAL (`RLock`, et un verrou de fichier dans msal-extensions). La création paresseuse de l'application
+  MSAL, elle, ne l'est pas : `Microsoft._verrou_jeton` la couvre, avec l'acquisition du jeton.
+- `session.send_and_wait` renvoie l'événement du message final, dont `data.content` donne le texte.
+  Une session avec `tools=[]`, `available_tools=[]` et le refus de toute permission ne peut rien faire.
+- `memoire.abonner` ne transmet que les jours. Les phrases d'une séance passent par un nouvel
+  abonnement, `memoire.abonner_ecoutes`.
+- La passe des engagements a été rejouée **avec le vrai modèle** sur une séance fictive, dans un
+  dossier temporaire et avec un faux compte. Elle garde les 3 engagements attendus (« demain »,
+  « jeudi », « d'ici le 19 », avec les bonnes dates) et écarte un café, un « je vais voir », les phrases
+  des autres voix et une consigne adressée à Joi.
+
+Écarts au plan :
+- Partie 5 : l'utilisateur vérifie ses courriels toutes les 60 minutes (`.env`). À sa demande, le
+  contexte du réveil est donc rafraîchi à part, toutes les 5 minutes (`veille.RAFRAICHIR_MINUTES`), et
+  sert 6 minutes au plus, au lieu de `VERIFIER_MINUTES + 1`. Les annonces de courriels gardent leur
+  rythme. Quand personne n'est là, les nouveaux courriels sont notés à chaque rafraîchissement, sans
+  annonce, comme le faisait le réveil.
+- Partie 5, après la relecture : le contexte gardé est invalidé dès qu'un outil d'écriture du compte
+  est permis, et rafraîchi à la fin de chaque conversation. Une erreur passagère garde l'ancien
+  contexte, une déconnexion le remplace, et un rafraîchissement plus ancien ne remplace pas un plus
+  récent.
+- Partie 6 : sur un oui, c'est l'outil `marquer_proposition` qui crée la tâche, avec la citation en
+  note, au lieu de laisser le modèle appeler `ajouter_tache`. Le gestionnaire de permissions vérifie que
+  le dernier tour de la personne est un oui (`engagements.est_oui`, un peu plus large que la
+  confirmation d'un courriel, toujours sans négation).
+- Partie 6 : le modèle ne lit pas toute la séance. Il lit seulement les phrases candidates de la
+  personne, avec trois lignes avant et une après. Sans phrase candidate, il n'est pas appelé du tout.
+- Partie 6 : « une fois » est tenu par le code. Une proposition montrée à un réveil (`montree_le`) ne
+  revient pas les jours suivants. Elle n'est pas refusée pour autant.
+- Partie 6 : la consigne de proposition est dans l'en-tête de la section du réveil, et n'entre dans le
+  prompt que s'il y a quelque chose à proposer. `compte/personnalite.md` ne gagne qu'une ligne.
+
+Mesures (avant → après) :
+- Prompt système depuis master : +978 octets en tout (`personnalite.md` +597, `compte/personnalite.md`
+  +381), sous la limite de 1 Ko.
+- Contexte du compte, dans les tests (faux fournisseur, 0,3 s par appel) : 1,2 s en série avant, environ
+  0,3 s en parallèle, et immédiat depuis le cache.
+
+Restent à l'utilisateur :
+- Les vérifications de la session 1 : la longueur des récits, « qu'as-tu entendu ce matin ? » juste
+  après une écoute, un courriel reçu pendant l'écoute, et `python -m joi.memoire condenser`.
+- Le réveil en vrai : la ligne « Joi est réveillée en … s » doit descendre sous 2 s, et le journal doit
+  montrer « Contexte du compte servi depuis celui de … ».
+- Une journée d'écoute, puis le réveil du lendemain : les engagements proposés sont-ils les bons, et pas
+  trop nombreux ? Un « oui » crée-t-il bien la tâche dans la liste « Joi » ?
+- Relancer `/proposer-ameliorations` après une semaine.
+
+Reste à coder : rien dans ce plan. Pistes notées :
+- `compte.modele.externe()` n'échappe pas sa balise de fin.
+- Les écritures de `propositions.json` entre deux processus sont atomiques, mais sans verrou entre
+  processus (le cas est rare).
+- Un « plus tard » pour `marquer_proposition`, si l'usage le demande.

@@ -53,8 +53,9 @@ log = logging.getLogger("joi.transcription")
 URL_API = "https://api.assemblyai.com/v2"
 LANGUE = "fr"
 
-# Prix en dollars US par heure d'audio, relevés sur assemblyai.com/pricing le 2026-11-12.
-PRIX_HEURE = {"universal-3-5-pro": 0.21, "universal-2": 0.15}
+# Prix en dollars US par heure d'audio, relevés sur assemblyai.com/pricing le 2026-11-12
+# (assemblyai-stt-3-7 le 2026-11-19).
+PRIX_HEURE = {"assemblyai-stt-3-7": 0.21, "universal-3-5-pro": 0.21, "universal-2": 0.15}
 PRIX_VOIX_HEURE = 0.02  # speaker_labels, en différé
 
 TRANSCRIPTIONS_SIMULTANEES = 3
@@ -127,6 +128,29 @@ async def transcrire_en_attente() -> None:
         "Écoute transcrite : %d segment(s) sur %d, %.2f h d'audio facturées, environ %.2f $ US (%.0f s)",
         reussis, len(a_faire), secondes / 3600, cout, time.perf_counter() - debut,
     )
+    noter_cout_des_jours({segment["debut"][:10] for _, _, segment in a_faire if segment.get("debut")})
+
+
+def cout_du_jour(jour: str) -> float:
+    """Le coût estimé (dollars US) des segments transcrits ce jour-là, gardé dans les manifestes : il
+    tient même si Joi a été relancée entre deux écoutes (le lot, lui, ne compte que sa part). Un
+    segment transcrit avant que le coût soit gardé est estimé d'après sa durée."""
+    total = 0.0
+    for _, manifeste, _ in enregistreur.seances():
+        for segment in manifeste.get("segments", []):
+            if not str(segment.get("debut", "")).startswith(jour):
+                continue
+            if segment.get("cout") is not None:
+                total += segment["cout"]
+            elif segment.get("etat") in ("transcrit", "consolide"):
+                total += _facture({}, segment)[1]
+    return total
+
+
+def noter_cout_des_jours(jours: set[str]) -> None:
+    """Le cumul du jour au journal, après chaque lot : la révision des données le reprend tel quel."""
+    for jour in sorted(jours):
+        log.info("Coût de transcription du %s : %.2f $ US", jour, cout_du_jour(jour))
 
 
 async def _transcrire_segment(
@@ -159,6 +183,7 @@ async def _transcrire_segment(
             brut.write_text(json.dumps(resultat, ensure_ascii=False), encoding="utf-8")
             await _effacer_chez_assemblyai(client, resultat.get("id"))
             facture = _facture(resultat, segment)
+            segment["cout"] = round(facture[1], 4)  # enregistré avec le manifeste, pour le coût du jour
 
         voix = await _reconnaitre_voix(mp3, segment, resultat)
         entrees = entrees_du_segment(segment, resultat, voix)

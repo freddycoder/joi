@@ -15,13 +15,13 @@ import functools
 import logging
 import threading
 from datetime import timedelta
-from typing import Annotated, Callable
+from typing import Annotated, Callable, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import SERVEUR, brouillons, journal_compte, reglages
+from . import SERVEUR, brouillons, engagements, journal_compte, reglages
 from .fournisseur import ErreurCompte, Fournisseur, choisir
 from .modele import (date_complete, externe, ligne_courriel, ligne_evenement, ligne_tache, lire_instant,
                      maintenant, numero_court, quand)
@@ -313,5 +313,28 @@ def creer_serveur(fournisseur: Fournisseur | None = None) -> MCPServer:
         t = compte.terminer_tache(registre.resoudre(id, "t")[0])
         journal_compte.tache("terminee", t)
         return f"Terminée : {t.titre}."
+
+    # --- Engagements entendus pendant l'écoute ------------------------------------------------
+
+    @outil(ecriture)
+    def marquer_proposition(
+        numero: Annotated[str, Field(description="Le numéro de la proposition, ex. p3a9f1.")],
+        reponse: Annotated[Literal["oui", "non"], Field(description="La réponse de la personne.")],
+    ) -> str:
+        """La réponse de la personne à un engagement proposé au réveil : « oui » ajoute la tâche à ta
+        liste (avec ce qu'elle a dit en note), « non » retient le refus (tu n'en reparles plus)."""
+        numero = numero.strip().lower().strip("[]")
+        ouverte = next((p for p in engagements.lire() if p.get("numero") == numero), None)
+        if ouverte is None:
+            raise ErreurCompte(f"Proposition inconnue ({numero}) : reprends le numéro du réveil.")
+        if ouverte.get("etat") != "proposee":
+            raise ErreurCompte(f"Cette proposition n'est plus ouverte ({ouverte.get('etat')}).")
+        if reponse == "non":
+            engagements.marquer(numero, "non")
+            return "C'est noté : tu n'en reparles plus."
+        t = compte.ajouter_tache(ouverte["titre"], engagements.note_de_tache(ouverte))
+        journal_compte.tache("ajoutee", t)
+        engagements.marquer(numero, "oui")
+        return f"Ajoutée : {ligne_tache(t, registre.numero('t', t.id))}."
 
     return serveur

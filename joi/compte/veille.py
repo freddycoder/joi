@@ -1,7 +1,10 @@
 """La veille du compte, dans le serveur de Joi (pas dans le serveur MCP, qui ne peut pas lui parler).
 
 - contexte_reveil() : la section « Ton compte » du prompt au réveil (date du jour, courriels non lus,
-  ta journée et celle de Joi, ses tâches). 5 s au plus : sinon, Joi se réveille sans.
+  ta journée et celle de Joi, ses tâches). Elle vient du dernier contexte gardé en mémoire s'il a moins
+  de RAFRAICHIR_MINUTES + 1 min (préparé au démarrage du serveur, rafraîchi toutes les RAFRAICHIR_MINUTES
+  par joi/serveur.py, et en fond après un réveil) : Joi se réveille sans attendre Graph. Sinon, on le
+  demande, les blocs en parallèle : 5 s au plus, sinon Joi se réveille sans.
 - verifier() : les courriels arrivés depuis la dernière fois. Chacun entre au journal (en résumé) une
   seule fois ; le serveur de Joi annonce ceux qui sont pertinents (voir joi/serveur.py).
 - etat() : pour le monitoring (connecté, dernière vérification, non lus, dernière erreur).
@@ -15,9 +18,11 @@ import json
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from . import journal_compte, reglages
+from . import engagements, journal_compte, reglages
 from .fournisseur import CompteDeconnecte, ErreurCompte, choisir
 from .modele import (Courriel, date_complete, externe, ligne_courriel, ligne_evenement, ligne_tache,
                      maintenant, numero_court)
@@ -28,12 +33,30 @@ DELAI_REVEIL = 5  # secondes
 PREMIERE_FOIS = timedelta(days=1)  # sans état : les courriels des dernières 24 h
 MARGE = timedelta(minutes=5)  # on redemande un peu avant le dernier vu (les doublons sont écartés)
 VUS_GARDES = 300
+# Le contexte du réveil est rafraîchi à ce rythme, à part de la vérification des courriels
+# (JOI_COURRIEL_VERIFIER_MINUTES, qui peut être d'une heure) : il sert RAFRAICHIR_MINUTES + MARGE_CACHE.
+RAFRAICHIR_MINUTES = 5
+MARGE_CACHE = timedelta(minutes=1)
+
+
+@dataclass
+class _Contexte:
+    """Le contexte du compte, sans son en-tête (l'heure du réveil et la date sont mises au moment de
+    servir). `complet` : aucun bloc n'a échoué ; `deconnecte` : le compte ne fonctionne plus du tout."""
+
+    lignes: list[str]
+    quand: datetime
+    complet: bool = True
+    deconnecte: bool = False
+    propositions: list[str] = field(default_factory=list)  # les numéros des engagements proposés
 
 
 class Veille:
     def __init__(self, fournisseur=None):
         self.fournisseur = fournisseur or choisir()
         self._verrou = threading.Lock()  # une vérification à la fois (réveil et vérification régulière)
+        self._cache: _Contexte | None = None
+        self._rafraichissement: asyncio.Task | None = None
         self._etat = {
             "connecte": None,
             "adresse": None,
@@ -113,9 +136,33 @@ class Veille:
 
     # --- Réveil -------------------------------------------------------------------------------
 
+    def _cache_valable(self) -> _Contexte | None:
+        """Le contexte gardé, s'il est assez récent pour être servi tel quel."""
+        cache = self._cache
+        if cache is None:
+            return None
+        instant = maintenant()
+        if cache.quand.date() != instant.date():  # « aujourd'hui » a changé
+            return None
+        if instant - cache.quand > timedelta(minutes=RAFRAICHIR_MINUTES) + MARGE_CACHE:
+            return None
+        return cache
+
+    @staticmethod
+    def _texte(contexte: _Contexte, depuis_cache: bool) -> str:
+        titre = f"## Ton compte (vu à {contexte.quand:%H:%M})" if depuis_cache else "## Ton compte (au réveil)"
+        lignes = [titre, f"Nous sommes le {date_complete()} (heure de {reglages.NOM_FUSEAU})."]
+        return "\n\n" + "\n".join(lignes + contexte.lignes) + "\n"
+
     async def contexte_reveil(self) -> str:
+        cache = self._cache_valable()
+        if cache is not None:
+            log.info("Contexte du compte servi depuis celui de %s ; rafraîchi en fond.", f"{cache.quand:%H:%M}")
+            self._lancer_rafraichissement()
+            await self._noter_montrees(cache)
+            return self._texte(cache, depuis_cache=True)
         try:
-            return await asyncio.wait_for(asyncio.to_thread(self._contexte), DELAI_REVEIL)
+            contexte = await asyncio.wait_for(asyncio.to_thread(self._contexte), DELAI_REVEIL)
         except TimeoutError:
             log.warning("Le compte n'a pas répondu en %d s : Joi se réveille sans lui.", DELAI_REVEIL)
             self._etat["derniere_erreur"] = f"{datetime.now():%H:%M} trop lent au réveil (> {DELAI_REVEIL} s)"
@@ -123,59 +170,161 @@ class Veille:
         except Exception:
             log.exception("Contexte du compte impossible au réveil")
             return ""
+        self._garder(contexte)
+        await self._noter_montrees(contexte)
+        return self._texte(contexte, depuis_cache=False)
 
-    def _contexte(self) -> str:
-        lignes = ["## Ton compte (au réveil)", f"Nous sommes le {date_complete()} (heure de {reglages.NOM_FUSEAU})."]
+    @staticmethod
+    async def _noter_montrees(contexte: _Contexte) -> None:
+        """Les engagements de ce contexte sont donnés à Joi : ils ne reviendront pas un autre jour."""
         try:
-            self._nouveaux()  # au journal, ceux arrivés depuis la dernière fois
-        except CompteDeconnecte as e:
-            self._erreur(e)
-            lignes.append(f"Ton compte ne fonctionne pas pour l'instant. {e} Si la personne te parle de tes "
-                          "courriels ou de l'agenda, dis-le-lui simplement.")
-            return "\n\n" + "\n".join(lignes) + "\n"
-        except ErreurCompte as e:
-            self._erreur(e)
+            await asyncio.to_thread(engagements.noter_montrees, contexte.propositions)
+        except Exception:
+            log.exception("Propositions montrées impossibles à noter")
 
-        f = self.fournisseur
+    # --- Le contexte gardé --------------------------------------------------------------------
+
+    def _garder(self, contexte: _Contexte) -> None:
+        """Un contexte incomplet (un bloc en erreur passagère) ne remplace pas un contexte complet : on
+        garde l'ancien, qui dit son heure. Une déconnexion, elle, le remplace : elle ne passera pas seule."""
+        ancien = self._cache
+        if ancien is not None and contexte.quand < ancien.quand:
+            return  # deux rafraîchissements se sont croisés : le plus récent reste
+        if not contexte.complet and not contexte.deconnecte and ancien is not None and ancien.complet:
+            log.warning("Contexte du compte pas rafraîchi (%s) : je garde celui de %s.",
+                        self._etat.get("derniere_erreur") or "erreur", f"{ancien.quand:%H:%M}")
+            return
+        self._cache = contexte
+
+    def invalider(self) -> None:
+        """Joi vient d'agir sur son compte (tâche cochée, événement créé…) : le contexte gardé ne dit
+        plus vrai. Le prochain réveil le redemande, à moins qu'un rafraîchissement ne l'ait précédé."""
+        self._cache = None
+
+    def rafraichir_en_fond(self) -> None:
+        """Lance un rafraîchissement sans l'attendre (fin de conversation : le prochain réveil sera prêt)."""
+        self._lancer_rafraichissement()
+
+    async def preparer(self, avec_nouveaux: bool = True) -> None:
+        """Prépare (ou rafraîchit) le contexte gardé, sans délai : personne n'attend. avec_nouveaux :
+        prendre aussi les courriels arrivés depuis la dernière fois (au démarrage du serveur)."""
         try:
-            non_lus = f.courriels_recents(True, 10)
-            self._etat["non_lus"] = len(non_lus)
-            if non_lus:
-                lignes.append(f"Courriels non lus dans ta boîte ({len(non_lus)}{' ou plus' if len(non_lus) == 10 else ''}), "
-                              "à mentionner au moment opportun si c'est utile (le numéro sert à lire_courriel) :")
-                lignes.append(externe("\n".join(f"- {ligne_courriel(c, numero_court('c', c.id))}" for c in non_lus)))
-            else:
-                lignes.append("Aucun courriel non lu.")
-        except ErreurCompte as e:
+            contexte = await asyncio.to_thread(self._contexte, avec_nouveaux)
+        except Exception as e:
+            log.exception("Contexte du compte impossible à préparer")
             self._erreur(e)
-            lignes.append("Tes courriels ne sont pas disponibles pour l'instant.")
+            return
+        self._garder(contexte)
 
+    async def rafraichir(self) -> None:
+        """Rafraîchit le contexte gardé, sans prendre les nouveaux courriels : pendant une conversation,
+        la vérification régulière s'en charge, et c'est elle qui les annonce."""
+        await self.preparer(avec_nouveaux=False)
+
+    def _lancer_rafraichissement(self) -> None:
+        if self._rafraichissement is None or self._rafraichissement.done():
+            self._rafraichissement = asyncio.get_running_loop().create_task(self.rafraichir())
+
+    async def attendre_rafraichissement(self) -> None:
+        """Attend la fin du rafraîchissement en fond, s'il y en a un (pour les tests)."""
+        if self._rafraichissement is not None:
+            await self._rafraichissement
+
+    # --- Les blocs du contexte ----------------------------------------------------------------
+
+    def _bloc_courriels(self) -> list[str]:
+        non_lus = self.fournisseur.courriels_recents(True, 10)
+        self._etat["non_lus"] = len(non_lus)
+        if not non_lus:
+            return ["Aucun courriel non lu."]
+        return [f"Courriels non lus dans ta boîte ({len(non_lus)}{' ou plus' if len(non_lus) == 10 else ''}), "
+                "à mentionner au moment opportun si c'est utile (le numéro sert à lire_courriel) :",
+                externe("\n".join(f"- {ligne_courriel(c, numero_court('c', c.id))}" for c in non_lus))]
+
+    def _bloc_agenda(self) -> list[str]:
         debut = maintenant().replace(hour=0, minute=0, second=0, microsecond=0)
-        try:
-            evenements, remarques = f.agenda(debut, debut + timedelta(days=1), "tous")
-            for qui, titre in (("toi", "La journée de la personne (son agenda)"), ("joi", "Ton agenda")):
-                siens = [e for e in evenements if e.agenda == qui and not e.annule]
-                if siens:
-                    lignes.append(f"{titre}, aujourd'hui :")
-                    lignes.append(externe("\n".join(
-                        f"- {ligne_evenement(e, numero_court('e', e.id), avec_jour=False)}" for e in siens)))
-                else:
-                    lignes.append(f"{titre} : rien aujourd'hui.")
-            lignes += remarques
-        except ErreurCompte as e:
-            self._erreur(e)
-            lignes.append("L'agenda n'est pas disponible pour l'instant.")
-
-        try:
-            taches = f.taches()
-            if taches:
-                lignes.append("Tes tâches (ta liste de choses à faire, à rappeler à la personne si c'est le moment) :")
-                lignes += [f"- {ligne_tache(t, numero_court('t', t.id))}" for t in taches]
+        evenements, remarques = self.fournisseur.agenda(debut, debut + timedelta(days=1), "tous")
+        lignes = []
+        for qui, titre in (("toi", "La journée de la personne (son agenda)"), ("joi", "Ton agenda")):
+            siens = [e for e in evenements if e.agenda == qui and not e.annule]
+            if siens:
+                lignes.append(f"{titre}, aujourd'hui :")
+                lignes.append(externe("\n".join(
+                    f"- {ligne_evenement(e, numero_court('e', e.id), avec_jour=False)}" for e in siens)))
             else:
-                lignes.append("Ta liste de tâches est vide.")
-        except ErreurCompte as e:
+                lignes.append(f"{titre} : rien aujourd'hui.")
+        return lignes + remarques
+
+    def _bloc_taches(self) -> list[str]:
+        taches = self.fournisseur.taches()
+        if not taches:
+            return ["Ta liste de tâches est vide."]
+        return (["Tes tâches (ta liste de choses à faire, à rappeler à la personne si c'est le moment) :"]
+                + [f"- {ligne_tache(t, numero_court('t', t.id))}" for t in taches])
+
+    @staticmethod
+    def _bloc_engagements() -> tuple[list[str], list[str]]:
+        """Ce que la personne a dit qu'elle ferait, entendu pendant l'écoute (fichier local, pas de
+        réseau). La consigne n'entre dans le prompt que s'il y a quelque chose à proposer."""
+        try:
+            ouvertes = engagements.a_proposer()
+        except Exception:
+            log.exception("Propositions d'engagements illisibles")
+            return [], []
+        if not ouvertes:
+            return [], []
+        lignes = []
+        for p in ouvertes:
+            dite = datetime.fromisoformat(p["dite_le"])
+            pour = f", pour le {date_courte(p['echeance'])}" if p.get("echeance") else ""
+            lignes.append(f"- {p['numero']} : {p['titre']} (dit le {date_courte(dite.date().isoformat())} "
+                          f"à {dite:%H:%M}{pour}) : « {p['citation']} »")
+        return ["Ce que la personne a dit qu'elle ferait, entendu pendant l'écoute. Propose-lui chacun une "
+                "fois, en une phrase, au moment opportun (« hier tu as dit que…, je t'en fais une tâche ? »), "
+                "puis marquer_proposition avec sa réponse :", externe("\n".join(lignes))], \
+            [p["numero"] for p in ouvertes]
+
+    def _contexte(self, avec_nouveaux: bool = True) -> _Contexte:
+        """Les blocs (nouveaux courriels au journal, non lus, agenda, tâches) sont indépendants : ils
+        partent en parallèle, chacun dans son fil (le client HTTP et le cache des jetons sont sûrs entre
+        fils). Un bloc en erreur est remplacé par une phrase qui le dit."""
+        quand = maintenant()
+        blocs = {"courriels": self._bloc_courriels, "agenda": self._bloc_agenda, "taches": self._bloc_taches,
+                 "engagements": self._bloc_engagements}
+        if avec_nouveaux:
+            blocs["nouveaux"] = self._nouveaux  # au journal, ceux arrivés depuis la dernière fois
+        with ThreadPoolExecutor(max_workers=len(blocs), thread_name_prefix="veille") as fils:
+            futurs = {nom: fils.submit(bloc) for nom, bloc in blocs.items()}
+        resultats, erreurs = {}, {}
+        for nom, futur in futurs.items():
+            try:
+                resultats[nom] = futur.result()
+            except ErreurCompte as e:
+                erreurs[nom] = e
+        for nom, e in erreurs.items():
+            log.warning("Contexte du compte, bloc %s : %s", nom, e)
             self._erreur(e)
-        return "\n\n" + "\n".join(lignes) + "\n"
+        deconnexion = next((e for e in erreurs.values() if isinstance(e, CompteDeconnecte)), None)
+        if deconnexion:
+            return _Contexte([f"Ton compte ne fonctionne pas pour l'instant. {deconnexion} Si la personne te "
+                              "parle de tes courriels ou de l'agenda, dis-le-lui simplement."],
+                             quand, complet=False, deconnecte=True)
+        repli = {"courriels": ["Tes courriels ne sont pas disponibles pour l'instant."],
+                 "agenda": ["L'agenda n'est pas disponible pour l'instant."], "taches": [], "engagements": []}
+        lignes_engagements, propositions = resultats.get("engagements", ([], []))
+        resultats["engagements"] = lignes_engagements
+        lignes = []
+        for nom in ("courriels", "agenda", "taches", "engagements"):
+            lignes += resultats[nom] if nom in resultats else repli[nom]
+        # Les nouveaux courriels ne s'affichent pas : leur échec ne rend pas le contexte incomplet.
+        return _Contexte(lignes, quand, complet=not (erreurs.keys() & {"courriels", "agenda", "taches"}),
+                         propositions=propositions)
+
+
+def date_courte(jour: str) -> str:
+    """« 2026-11-17 » -> « mardi 17 »."""
+    d = datetime.fromisoformat(jour)
+    return f"{('lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche')[d.weekday()]} {d.day}"
 
 
 _instance: Veille | None = None
@@ -186,3 +335,9 @@ def instance() -> Veille:
     if _instance is None:
         _instance = Veille()
     return _instance
+
+
+def invalider() -> None:
+    """Invalide le contexte gardé, s'il y a une veille (sinon, rien à invalider)."""
+    if _instance is not None:
+        _instance.invalider()

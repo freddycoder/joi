@@ -38,7 +38,21 @@ Routes HTTP du tableau de bord (panneaux latéraux de l'interface, voir joi/moni
 Le compte de Joi (optionnel, JOI_COMPTE ; voir joi/compte/) : ses outils sont servis à la session
 Copilot par un serveur MCP. Ici, la veille vérifie les nouveaux courriels toutes les
 JOI_COURRIEL_VERIFIER_MINUTES et les glisse dans la conversation, sous forme de message système,
-quand Joi est inactive depuis 10 s (en mode écoute : au retour). Sans compte, rien de tout ça.
+quand Joi est inactive depuis 10 s (en mode écoute : au retour). Le contexte du réveil (non lus,
+agendas, tâches) est gardé en mémoire et rafraîchi toutes les 5 minutes, et après chaque conversation :
+Joi se réveille sans attendre Microsoft, avec un contexte qui dit l'heure où il a été vu. Quand personne
+n'est là, les nouveaux courriels sont notés au journal à ce même rythme, sans annonce. Après chaque
+écoute apprise, une passe du modèle sans outils relève ce que la personne a dit qu'elle ferait
+(joi/compte/engagements.py, le code trie) ; Joi le lui propose au réveil, une fois, et seul un oui de
+la personne en fait une tâche (jamais un courriel ni une invitation). Sans compte, rien de tout ça.
+
+Avant l'annonce, Joi sait déjà que ces courriels sont arrivés : leur nombre (rien d'écrit par un
+tiers) part, en note, devant le tour suivant de la personne, et elle les lit avec ses outils si on
+lui demande « as-tu reçu des courriels ? » juste au retour de l'écoute. De même, si l'écoute est encore
+en train d'être apprise, une note le lui dit une fois, pour qu'elle n'invente rien sur ce qu'elle a
+entendu. Le SDK n'a pas de moyen public d'ajouter un message à l'historique sans faire répondre le
+modèle : la note voyage donc avec le tour de la personne, et seuls ses mots comptent pour confirmer
+un courriel.
 
 Les deux modes :
   conversation   l'audio part en streaming vers AssemblyAI, Joi répond (mode au réveil)
@@ -183,7 +197,7 @@ async def _veiller_courriels() -> None:
     while True:
         await asyncio.sleep(reglages.VERIFIER_MINUTES * 60)
         if not _conversations:
-            continue  # personne n'est là : le prochain réveil les rattrapera
+            continue  # personne n'est là : _tenir_contexte_compte les note sans les annoncer
         nouveaux = await veille.instance().verifier()
         pertinents = [c for c in nouveaux if c.pertinent]
         if len(pertinents) < len(nouveaux):
@@ -192,6 +206,23 @@ async def _veiller_courriels() -> None:
         if pertinents:
             for conversation in list(_conversations):
                 conversation.recevoir_courriels(pertinents)
+
+
+async def _tenir_contexte_compte() -> None:
+    """Compte actif seulement : le contexte du réveil (non lus, agendas, tâches) est préparé au
+    démarrage, puis rafraîchi toutes les veille.RAFRAICHIR_MINUTES, pour que Joi se réveille sans
+    attendre Graph (4 à 6 s en série). Quand aucune conversation n'est ouverte, les nouveaux courriels
+    sont aussi notés au journal, sans annonce, comme le faisait le réveil : ils figurent parmi les non
+    lus du contexte. Pendant une conversation, c'est _veiller_courriels qui les prend et les annonce."""
+    from .compte import veille
+
+    await veille.instance().preparer()
+    while True:
+        await asyncio.sleep(veille.RAFRAICHIR_MINUTES * 60)
+        if not _conversations:
+            await veille.instance().verifier()
+        veille.instance().rafraichir_en_fond()  # pas deux rafraîchissements à la fois
+        await veille.instance().attendre_rafraichissement()
 
 
 async def _prechauffer_voix() -> None:
@@ -213,6 +244,21 @@ async def _prechauffer_cerveau() -> None:
         log.warning("Client Copilot pas encore démarré (il le sera au réveil) : %s", e)
 
 
+def _demarrer_compte() -> None:
+    """Le compte (optionnel) : sans JOI_COMPTE, rien de joi.compte n'est importé."""
+    if config.JOI_COMPTE_REFUSE:
+        log.warning("JOI_COMPTE=%s n'est pas pris en charge (microsoft seulement pour l'instant) : "
+                    "Joi démarre sans compte.", config.JOI_COMPTE_REFUSE)
+    if not config.JOI_COMPTE:
+        return
+    _en_fond(_veiller_courriels())
+    _en_fond(_tenir_contexte_compte())
+    # Les engagements de la personne entendus pendant l'écoute, relevés après chaque écoute apprise.
+    from .compte import engagements
+
+    engagements.installer(_en_fond)
+
+
 @asynccontextmanager
 async def cycle_de_vie(_app: FastAPI):
     monitoring.installer()
@@ -226,11 +272,7 @@ async def cycle_de_vie(_app: FastAPI):
     # Le modèle de reconnaissance des voix (~10 s à charger, téléchargé une fois), prêt au premier tour.
     _en_fond(asyncio.to_thread(empreintes.preparer))
     _en_fond(_surveiller_fin_de_journee())
-    if config.JOI_COMPTE_REFUSE:
-        log.warning("JOI_COMPTE=%s n'est pas pris en charge (microsoft seulement pour l'instant) : "
-                    "Joi démarre sans compte.", config.JOI_COMPTE_REFUSE)
-    if config.JOI_COMPTE:
-        _en_fond(_veiller_courriels())
+    _demarrer_compte()
     yield
     await arreter_client_partage()
 
@@ -312,9 +354,18 @@ class MesureReponse:
       MP3 envoyé → lecture         le navigateur décode et commence à jouer (message « lecture »)
 
     Le premier son peut être une phrase d'attente (« Laisse-moi me rappeler… ») quand Joi fouille sa
-    mémoire : c'est bien ce que la personne entend en premier."""
+    mémoire : c'est bien ce que la personne entend en premier. La ligne dit alors aussi quand est
+    parti le son de la première vraie phrase (« vraie réponse ») : sans elle, le total serait trompeur.
 
-    def __init__(self, tour: Tour | None):
+    modele : le modèle Copilot (None : celui de Copilot par défaut), pour comparer d'un jour à l'autre."""
+
+    def __init__(self, tour: Tour | None, modele: str | None = None):
+        self.modele = modele
+        self.consultations = 0  # du compte de Joi (agenda, courriels…)
+        self.attente = False  # le premier son est une phrase d'attente, dite pendant un outil
+        # L'envoi du son de la première vraie phrase : après la phrase d'attente, c'est la réponse que
+        # la personne attend vraiment (le total, lui, s'arrête à la phrase d'attente).
+        self.son_reponse: float | None = None
         self.fin_parole = tour.fin_parole if tour else None
         self.tour_final = tour.recu if tour else None
         self.envoi: float | None = None
@@ -341,6 +392,9 @@ class MesureReponse:
             "lecture": self._ecart(self.mp3_envoye, self.lecture),
             "total": self._ecart(debut, self.lecture or self.mp3_envoye),
             "recherches": self.recherches,
+            "consultations": self.consultations,
+            "vraie_reponse": self._ecart(debut, self.son_reponse) if self.attente else None,
+            "modele": self.modele or "défaut",
         }
 
     def ligne(self) -> str:
@@ -354,7 +408,10 @@ class MesureReponse:
         return (f"Latence : fin de tour {s('fin_de_tour')} · cerveau : 1er mot {s('premier_mot')}, "
                 f"1re phrase {s('premiere_phrase')} · synthèse {s('synthese')}{cache} · "
                 f"lecture {s('lecture')} · total {s('total')} ({debut} → premier son)"
-                + (f" · {r['recherches']} recherche(s)" if r["recherches"] else ""))
+                + (f" · vraie réponse {s('vraie_reponse')} (après la phrase d'attente)" if self.attente else "")
+                + f" · modèle {r['modele']}"
+                + (f" · {r['recherches']} recherche(s)" if r["recherches"] else "")
+                + (f" · {r['consultations']} consultation(s) du compte" if r["consultations"] else ""))
 
 
 class GardeFouSilence:
@@ -428,6 +485,11 @@ class Conversation:
         # Compte de Joi : les courriels à annoncer (courriel, arrivé pendant l'écoute), et le dernier
         # signe de vie de la conversation (pour annoncer seulement quand Joi est inactive).
         self._courriels: list[tuple] = []
+        # Les mêmes courriels, que Joi doit connaître dès le prochain tour de la personne, même si
+        # l'annonce attend encore (« as-tu reçu des courriels ? » juste au retour de l'écoute).
+        self._courriels_a_glisser: list[tuple] = []
+        # Joi a été prévenue qu'un apprentissage d'écoute est en cours (une fois par apprentissage).
+        self._apprentissage_signale = False
         self._derniere_activite = time.monotonic()
         # Les journées dont une écoute vient d'être apprise : Joi le sait (et peut le dire) dès qu'elle
         # est inactive et que l'apprentissage est fini.
@@ -521,6 +583,11 @@ class Conversation:
             await self.cerveau.arreter()
             # La conversation est finie : Joi range ses souvenirs (et transcrit l'écoute, s'il y en a une).
             lancer_consolidation()
+            if config.JOI_COMPTE:
+                from .compte import veille
+
+                # Ce que Joi a fait sur son compte pendant la conversation : le prochain réveil le saura.
+                veille.instance().rafraichir_en_fond()
 
     async def traiter_commande(self, brut: str) -> None:
         commande = json.loads(brut)
@@ -702,6 +769,9 @@ class Conversation:
             # L'écoute est finie : Joi l'apprend en fond pendant que la conversation reprend.
             _en_fond(transcription.apprendre())
         self.mode = "conversation"
+        # Une nouvelle écoute à apprendre : Joi doit en être prévenue de nouveau, même si elle l'a été
+        # pour la précédente.
+        self._apprentissage_signale = False
         await self.envoyer(type="etat", etat="eveil")
         # Une nouvelle session AssemblyAI recommence la numérotation des tours : nouvelles oreilles.
         self.oreilles = self._nouvelles_oreilles()
@@ -869,7 +939,7 @@ class Conversation:
         if not systeme:
             if self._mesure:  # la réponse précédente n'a jamais été jouée : on la note quand même
                 self._terminer_mesure()
-            mesure = self._mesure = MesureReponse(tour)
+            mesure = self._mesure = MesureReponse(tour, modele=getattr(self.cerveau, "modele", None))
             journal.noter("toi", texte)
             await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
@@ -916,6 +986,8 @@ class Conversation:
                     await self.envoyer_audio(audio)
                     if mesure and mesure.mp3_envoye is None:
                         mesure.synthese, mesure.mp3_envoye = infos, time.monotonic()
+                    if mesure and not attente and mesure.son_reponse is None:
+                        mesure.son_reponse = time.monotonic()  # la vraie réponse, pas l'attente
 
         envoi = asyncio.create_task(envoyer_dans_l_ordre())
 
@@ -933,10 +1005,14 @@ class Conversation:
             nonlocal attente_dite
             if not attente_dite and not dites and not systeme:
                 attente_dite = True
+                if mesure:
+                    mesure.attente = True
                 await dire(random.choice(phrases), attente=True)
 
         try:
-            async for morceau in self.cerveau.repondre(texte, systeme=systeme):
+            # La note est prise au dernier moment : ce qu'elle retire de la file part avec ce tour.
+            note = None if systeme else self._note_pour_le_tour()
+            async for morceau in self.cerveau.repondre(texte, systeme=systeme, note=note):
                 if mesure:
                     mesure.envoi, mesure.premier_token = self.cerveau.envoi, self.cerveau.premier_token
                 if isinstance(morceau, RECHERCHE):
@@ -991,6 +1067,7 @@ class Conversation:
             self._derniere_activite = time.monotonic()
             if mesure:
                 mesure.recherches = recherches
+                mesure.consultations = consultations
                 mesure.reponse_finie = True
                 # Sans son, ou déjà en lecture : rien de plus à attendre du navigateur.
                 if self._mesure is mesure and (mesure.mp3_envoye is None or mesure.lecture is not None):
@@ -1001,7 +1078,52 @@ class Conversation:
     def recevoir_courriels(self, courriels: list) -> None:
         """De nouveaux courriels pertinents : annoncés dès que Joi est inactive (en mode écoute : au
         retour en conversation, en signalant qu'ils sont arrivés pendant l'écoute)."""
-        self._courriels += [(c, self.mode == "ecoute") for c in courriels]
+        nouveaux = [(c, self.mode == "ecoute") for c in courriels]
+        self._courriels += nouveaux
+        self._courriels_a_glisser += nouveaux
+
+    def _prendre_courriels_a_annoncer(self) -> list[tuple]:
+        """Le lot à annoncer : le message d'annonce les présente à Joi, plus besoin de les glisser."""
+        lot, self._courriels, self._courriels_a_glisser = self._courriels, [], []
+        return lot
+
+    def _note_pour_le_tour(self) -> str | None:
+        """Ce que Joi doit savoir avant de répondre au tour de la personne, pour ne pas inventer ce
+        qui s'est passé pendant l'écoute : un apprentissage pas fini, des courriels pas encore
+        annoncés. Chaque chose une seule fois ; None s'il n'y a rien."""
+        morceaux = []
+        # Le verrou de la transcription seulement : il couvre l'écoute (transcription puis
+        # consolidation), pas la consolidation d'une conversation, qui n'a rien à voir avec l'écoute.
+        if transcription._verrou.locked():
+            if not self._apprentissage_signale:
+                self._apprentissage_signale = True
+                morceaux.append(
+                    "[apprentissage en cours] Tu n'as pas fini d'apprendre ce que tu as entendu en "
+                    "écoutant. Si on te le demande, cherche quand même avec se_souvenir (une partie est "
+                    "peut-être déjà apprise) et dis ce qui manque encore, sans l'inventer.")
+        elif self._apprentissage_signale:
+            # La note précédente est restée dans l'historique : la démentir, sinon Joi répondrait
+            # « pas encore appris » jusqu'à l'annonce, qui attend 10 s de silence.
+            self._apprentissage_signale = False
+            morceaux.append(
+                "[apprentissage fini] Tu as fini d'apprendre ce que tu as entendu : pour en parler, "
+                "cherche avec se_souvenir en nommant la journée.")
+        if self._courriels_a_glisser:
+            # Le nombre seulement, jamais l'expéditeur, le sujet ni l'aperçu : la note voyage dans le
+            # tour de la personne, et rien d'écrit par un tiers ne doit y entrer. Joi lit les courriels
+            # avec ses outils (résultat d'outil, balisé comme contenu externe), ou par l'annonce
+            # (message système), comme avant.
+            lot, self._courriels_a_glisser = self._courriels_a_glisser, []
+            quand = ("pendant que tu écoutais en silence" if any(p for _, p in lot)
+                     else "pendant que vous parliez")
+            nombre = "Un courriel est arrivé" if len(lot) == 1 else f"{len(lot)} courriels sont arrivés"
+            morceaux.append(
+                f"[courriels pas encore annoncés] {nombre} dans ta boîte {quand}. Si on te demande "
+                "tes courriels, consulte-les avec courriels_recents avant de répondre.")
+        if not morceaux:
+            return None
+        return ("\n\n".join(morceaux)
+                + "\n\nCes notes ne viennent pas de la personne. Voici ce qu'elle vient de dire :")
 
     def _inactive(self) -> bool:
         maintenant = time.monotonic()
@@ -1031,11 +1153,12 @@ class Conversation:
             if not self._inactive():
                 continue
             if self._courriels:
-                lot, self._courriels = self._courriels, []
+                lot = self._prendre_courriels_a_annoncer()
                 log.info("Annonce possible de %d courriel(s) : Joi juge s'ils sont utiles.", len(lot))
                 self.tache_reponse = asyncio.create_task(self.repondre(_message_courriels(lot), systeme=True))
             elif self._journees_apprises and not _apprentissage_en_cours():
                 jours, self._journees_apprises = sorted(self._journees_apprises), set()
+                self._apprentissage_signale = False  # l'annonce dit elle-même que c'est appris
                 log.info("Mémoire : écoute du %s apprise, Joi le sait.", ", ".join(jours))
                 self.tache_reponse = asyncio.create_task(self.repondre(_message_journees(jours), systeme=True))
 
