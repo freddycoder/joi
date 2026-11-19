@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -79,20 +79,98 @@ def _vers_graph(instant: datetime) -> dict:
             "timeZone": "UTC"}
 
 
-def _couper_citations(texte: str) -> str:
+# La ligne qui sépare un message de ce qu'il cite ou transfère (Outlook, Gmail, Apple Mail).
+_SEPARATEUR = re.compile(
+    r"^(-{2,}\s*(original message|message d'origine|forwarded message|message transféré)|_{5,}"
+    r"|begin forwarded message|début du message (réexpédié|transféré))", re.I)
+_SUJET_TRANSFERT = re.compile(r"^\s*(tr|fwd?)\s*:", re.I)
+# Les en-têtes d'un courriel transféré : ceux qu'on garde, et ceux qu'on saute (destinataires).
+_ENTETE_GARDE = re.compile(r"^(de|from|envoyé|sent|date|objet|subject)\s*:", re.I)
+_ENTETE_SAUTE = re.compile(r"^(à|a|to|cc|cci|bcc|répondre à|reply-to)\s*:", re.I)
+
+
+def _lignes(texte: str) -> list[str]:
+    return texte.replace("\r\n", "\n").split("\n")
+
+
+def _sans_citations(texte: str) -> str:
     """Retire l'historique cité sous une réponse (« Le … a écrit : », « De : … », lignes « > »)."""
     lignes = []
-    for ligne in texte.replace("\r\n", "\n").split("\n"):
+    for ligne in _lignes(texte):
         nette = ligne.strip()
-        if (re.match(r"^(-{2,}\s*(original message|message d'origine)|_{5,})", nette, re.I)
+        if (_SEPARATEUR.match(nette)
                 or re.match(r"^(le .+ a écrit|on .+ wrote)\s*:$", nette, re.I)
                 or (re.match(r"^(de|from)\s*:", nette, re.I) and lignes)):
             break
         if nette.startswith(">"):
             continue
         lignes.append(ligne.rstrip())
-    texte = re.sub(r"\n{3,}", "\n\n", "\n".join(lignes)).strip()
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lignes)).strip()
+
+
+_LIEN = re.compile(r"<?(https?://[^\s<>]+)>?")
+_IMAGE = re.compile(r"[ \t]*\[https?://[^\s\]]+\.(png|jpe?g|gif|webp|svg)\][ \t]*", re.I)
+_INVISIBLES = re.compile("[­͏​-‏⁠﻿]")
+TAILLE_MAX_LIEN = 100  # au-delà, un lien (souvent de suivi) n'apprend rien à Joi et noie le texte
+
+
+def _liens_courts(texte: str) -> str:
+    """Les liens d'un courriel en texte : Safelinks d'Outlook déballés, liens trop longs retirés
+    (« [lien] » s'il n'y a pas de texte autour), caractères invisibles des infolettres effacés."""
+    def raccourcir(m: re.Match) -> str:
+        lien = m.group(1)
+        if "safelinks.protection.outlook.com" in lien:
+            lien = (parse_qs(urlparse(lien).query).get("url") or [lien])[0]
+        if len(lien) <= TAILLE_MAX_LIEN:
+            return f"<{lien}>" if m.group(0).startswith("<") else lien
+        return "" if m.group(0).startswith("<") else "[lien]"
+    texte = _IMAGE.sub("", texte)  # « [https://…/icone.png] » : une image sans texte de remplacement
+    texte = _INVISIBLES.sub("", _LIEN.sub(raccourcir, texte))
+    return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", texte))
+
+
+def _tronquer(texte: str) -> str:
     return texte if len(texte) <= TAILLE_MAX_COURRIEL else texte[:TAILLE_MAX_COURRIEL] + "\n[…coupé]"
+
+
+def _texte_transfere(corps: str) -> str:
+    """Un courriel transféré : la note de celui qui transfère, puis le courriel transféré (expéditeur,
+    date, sujet et texte, sans son propre historique). Vide si le corps ne contient pas de transfert."""
+    lignes = _lignes(corps)
+    debut = next((i for i, l in enumerate(lignes)
+                  if _SEPARATEUR.match(l.strip()) or re.match(r"^(de|from)\s*:", l.strip(), re.I)), None)
+    if debut is None:
+        return ""
+    note = _sans_citations("\n".join(lignes[:debut]))
+    i = debut + 1 if _SEPARATEUR.match(lignes[debut].strip()) else debut
+    while i < len(lignes) and not lignes[i].strip():
+        i += 1
+    entetes = []
+    while i < len(lignes) and lignes[i].strip():
+        nette = lignes[i].strip()
+        if _ENTETE_GARDE.match(nette):
+            entetes.append(nette)
+        elif not _ENTETE_SAUTE.match(nette):
+            break
+        i += 1
+    if not entetes:
+        return ""
+    texte = _sans_citations("\n".join(lignes[i:]))
+    morceaux = [note] if note else []
+    morceaux.append("--- Courriel transféré ---\n" + "\n".join(entetes))
+    morceaux.append(texte or "(courriel transféré vide)")
+    return "\n\n".join(morceaux)
+
+
+def _texte_courriel(sujet: str, nouveau: str, corps: str) -> str:
+    """Le texte d'un courriel lu en entier. `nouveau` (uniqueBody) est ce que l'expéditeur a écrit
+    lui-même, sans l'historique ; `corps` (body) est le message complet. Un transfert garde le
+    courriel transféré, que l'historique d'une réponse perdrait."""
+    nouveau = nouveau if nouveau.strip() else ""
+    texte = _sans_citations(nouveau or corps)
+    if _SUJET_TRANSFERT.match(sujet or "") or not texte:
+        texte = _texte_transfere(corps) or texte
+    return _tronquer(_liens_courts(texte))
 
 
 class Microsoft:
@@ -283,8 +361,8 @@ class Microsoft:
             entetes={"Prefer": 'outlook.body-content-type="text"'},
         )
         courriel = self._courriel(m)
-        corps = (m.get("uniqueBody") or {}).get("content") or (m.get("body") or {}).get("content") or ""
-        courriel.texte = _couper_citations(corps)
+        courriel.texte = _texte_courriel(
+            courriel.sujet, (m.get("uniqueBody") or {}).get("content") or "", (m.get("body") or {}).get("content") or "")
         return courriel
 
     def chercher_courriels(self, recherche: str, nombre: int) -> list[Courriel]:
