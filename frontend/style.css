@@ -171,6 +171,42 @@ body[data-mode="ecoute"] #sous-titres { opacity: 0.35; }
   font-size: 14px;
 }
 .clavier input:focus { outline: none; border-color: var(--violet); }
+/* Une image glissée au-dessus de la page : le champ montre où elle ira */
+body.depot .clavier input { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(95, 216, 255, 0.2); }
+
+/* Captures collées (Ctrl+V), en attente d'être envoyées avec le message */
+.images-collees {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.images-collees[hidden] { display: none; }
+.image-collee {
+  position: relative;
+  height: 64px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+}
+.image-collee img { display: block; height: 100%; width: auto; max-width: 160px; object-fit: cover; }
+.image-collee button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(5, 4, 10, 0.8);
+  color: var(--texte);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.image-collee button:hover { color: var(--rose); }
 
 .erreur {
   position: fixed;

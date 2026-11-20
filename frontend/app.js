@@ -398,9 +398,144 @@ $("reveiller").addEventListener("click", async () => {
 $("clavier").addEventListener("submit", (e) => {
   e.preventDefault();
   const texte = $("saisie").value.trim();
-  if (!texte || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "texte", texte }));
+  if ((!texte && !imagesCollees.length) || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const message = { type: "texte", texte };
+  if (imagesCollees.length) {
+    message.images = imagesCollees.map(({ data, mimeType }) => ({ data, mimeType }));
+  }
+  ws.send(JSON.stringify(message));
   $("saisie").value = "";
+  viderImagesCollees();
+});
+
+// ---------- Captures collées (Ctrl+V) ----------
+
+// Une capture plus grande est réduite avant l'envoi : le modèle n'en voit pas plus, et le message
+// doit passer dans le WebSocket (le serveur refuse au-delà de 6 Mo de base64 par image).
+const COTE_IMAGE_MAX = 2000;
+const IMAGES_PAR_MESSAGE = 4;
+let imagesCollees = []; // { data (base64), mimeType, url (aperçu) }
+
+function lireImage(fichier) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(fichier);
+    const img = new Image();
+    img.onload = () => resolve({ img, url });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image illisible")); };
+    img.src = url;
+  });
+}
+
+async function preparerImage(fichier) {
+  const { img, url } = await lireImage(fichier);
+  const echelle = Math.min(1, COTE_IMAGE_MAX / Math.max(img.naturalWidth, img.naturalHeight));
+  const canevas = document.createElement("canvas");
+  canevas.width = Math.round(img.naturalWidth * echelle);
+  canevas.height = Math.round(img.naturalHeight * echelle);
+  canevas.getContext("2d").drawImage(img, 0, 0, canevas.width, canevas.height);
+  // PNG garde le texte d'une capture net ; trop lourd (une photo), on passe en JPEG.
+  let dataUrl = canevas.toDataURL("image/png");
+  if (dataUrl.length > 4_000_000) dataUrl = canevas.toDataURL("image/jpeg", 0.88);
+  const [entete, data] = dataUrl.split(",");
+  return { data, mimeType: entete.slice(5, entete.indexOf(";")), url };
+}
+
+function afficherImagesCollees() {
+  const zone = $("images-collees");
+  zone.replaceChildren(...imagesCollees.map((image, i) => {
+    const vignette = document.createElement("div");
+    vignette.className = "image-collee";
+    const img = document.createElement("img");
+    img.src = image.url;
+    img.alt = `capture ${i + 1}`;
+    const retirer = document.createElement("button");
+    retirer.type = "button";
+    retirer.textContent = "✕";
+    retirer.title = "Retirer cette image";
+    retirer.addEventListener("click", () => {
+      URL.revokeObjectURL(image.url);
+      imagesCollees.splice(i, 1);
+      afficherImagesCollees();
+      $("saisie").focus();
+    });
+    vignette.append(img, retirer);
+    return vignette;
+  }));
+  zone.hidden = !imagesCollees.length;
+}
+
+function viderImagesCollees() {
+  for (const image of imagesCollees) URL.revokeObjectURL(image.url);
+  imagesCollees = [];
+  afficherImagesCollees();
+}
+
+const EXTENSIONS_IMAGE = /\.(png|jpe?g|webp|gif|bmp)$/i;
+
+function estImage(fichier) {
+  return fichier.type.startsWith("image/") || EXTENSIONS_IMAGE.test(fichier.name || "");
+}
+
+// Les images d'un collage ou d'un glisser-déposer. Une capture (outil Capture d'écran) arrive dans
+// items ; un fichier copié dans l'Explorateur ou glissé, dans files. Les deux peuvent décrire la
+// même image : on prend files s'il y en a, sinon items.
+function imagesDe(transfert) {
+  if (!transfert) return [];
+  let fichiers = [...(transfert.files || [])];
+  if (!fichiers.length) {
+    fichiers = [...(transfert.items || [])]
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+  }
+  return fichiers.filter(estImage);
+}
+
+async function ajouterImages(fichiers) {
+  if ($("clavier").hidden) {
+    afficherErreur("Réveille Joi (en conversation) avant de lui montrer une image.");
+    return;
+  }
+  for (const fichier of fichiers) {
+    if (imagesCollees.length >= IMAGES_PAR_MESSAGE) {
+      afficherErreur(`${IMAGES_PAR_MESSAGE} images au plus par message.`);
+      break;
+    }
+    try {
+      imagesCollees.push(await preparerImage(fichier));
+    } catch (err) {
+      afficherErreur("Impossible de lire l'image : " + err.message);
+    }
+  }
+  afficherImagesCollees();
+  $("saisie").focus();
+}
+
+// Ctrl+V n'importe où dans la page (pas seulement dans le champ) : une image va dans le message.
+document.addEventListener("paste", (e) => {
+  const fichiers = imagesDe(e.clipboardData);
+  if (!fichiers.length) return; // du texte : collage normal
+  e.preventDefault();
+  ajouterImages(fichiers);
+});
+
+// Glisser-déposer une image n'importe où sur la page (sinon le navigateur l'ouvrirait à la place de Joi).
+document.addEventListener("dragover", (e) => {
+  if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+  document.body.classList.add("depot");
+});
+document.addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) document.body.classList.remove("depot");
+});
+document.addEventListener("drop", (e) => {
+  document.body.classList.remove("depot");
+  if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+  e.preventDefault();
+  const fichiers = imagesDe(e.dataTransfer);
+  if (fichiers.length) ajouterImages(fichiers);
+  else afficherErreur("Seules les images peuvent être montrées à Joi.");
 });
 
 // ---------- Hologramme ----------
