@@ -5,6 +5,7 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
   navigateur -> serveur
     binaire                                  audio du micro, PCM 16 bits mono 16 kHz
     {"type": "texte", "texte": "..."}        message tapé au clavier (au lieu de parler) ; ignoré en mode écoute
+      + "images": [{"data", "mimeType"}]     facultatif : images collées (captures d'écran), en base64
     {"type": "mode", "mode": "..."}          demande de changer de mode : conversation | ecoute
                                              (on peut aussi le dire : voir joi/commande_vocale.py)
     {"type": "lecture", "en_cours": bool}    la voix de Joi commence ou finit de jouer dans le
@@ -96,6 +97,13 @@ log = logging.getLogger("joi.serveur")
 
 # Nombre de mots entendus pendant que Joi parle avant de considérer qu'on l'interrompt.
 MOTS_POUR_INTERROMPRE = 2
+
+# Images collées dans un message tapé : formats que le modèle lit, combien, et quelle taille (base64).
+TYPES_IMAGE = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+IMAGES_PAR_MESSAGE = 4
+TAILLE_IMAGE_MAX = 6_000_000
+# Le message envoyé au modèle quand on colle une image sans rien écrire.
+TEXTE_SANS_MOTS = "(capture d'écran)"
 
 ORIGINES_AUTORISEES = {
     f"http://localhost:{config.JOI_PORT}",
@@ -281,6 +289,16 @@ app = FastAPI(title="Joi", lifespan=cycle_de_vie)
 app.mount("/static", StaticFiles(directory=config.DOSSIER_FRONTEND), name="static")
 
 
+@app.middleware("http")
+async def sans_cache_navigateur(requete: Request, suivant):
+    """La page et ses fichiers sont revalidés à chaque chargement : sans ça, le navigateur garde
+    l'ancien app.js après une mise à jour de Joi (la revalidation coûte une requête 304 en local)."""
+    reponse = await suivant(requete)
+    if requete.url.path == "/" or requete.url.path.startswith("/static/"):
+        reponse.headers["Cache-Control"] = "no-cache"
+    return reponse
+
+
 @app.get("/")
 async def accueil():
     return FileResponse(config.DOSSIER_FRONTEND / "index.html")
@@ -457,6 +475,27 @@ async def websocket_joi(ws: WebSocket):
     await Conversation(ws).executer()
 
 
+def images_valides(images) -> list[dict]:
+    """Les images collées d'un message tapé, réduites à celles que le modèle peut lire : un type
+    d'image connu, du base64 pas trop gros, IMAGES_PAR_MESSAGE au plus. Le reste est ignoré."""
+    if not isinstance(images, list):
+        return []
+    gardees = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        donnees, genre = image.get("data"), image.get("mimeType")
+        if genre not in TYPES_IMAGE or not isinstance(donnees, str) or not donnees:
+            continue
+        if len(donnees) > TAILLE_IMAGE_MAX:
+            log.warning("Image collée ignorée : trop grosse (%d Ko).", len(donnees) // 1024)
+            continue
+        gardees.append({"data": donnees, "mimeType": genre})
+    if len(gardees) > IMAGES_PAR_MESSAGE:
+        log.warning("Images collées : %d, seules les %d premières sont gardées.", len(gardees), IMAGES_PAR_MESSAGE)
+    return gardees[:IMAGES_PAR_MESSAGE]
+
+
 class Conversation:
     """Une conversation entre une personne (un onglet du navigateur) et Joi."""
 
@@ -593,9 +632,11 @@ class Conversation:
         commande = json.loads(brut)
         genre = commande.get("type")
         self._derniere_activite = time.monotonic()
-        if genre == "texte" and commande.get("texte", "").strip():
-            if self.mode == "conversation":
-                await self.sur_tour(Tour(commande["texte"].strip(), True, -1))
+        if genre == "texte":
+            texte = str(commande.get("texte") or "").strip()
+            images = images_valides(commande.get("images"))
+            if (texte or images) and self.mode == "conversation":
+                await self.sur_tour(Tour(texte or TEXTE_SANS_MOTS, True, -1, images=images))
         elif genre == "mode" and commande.get("mode") in ("conversation", "ecoute"):
             await self.changer_mode(commande["mode"])
         elif genre == "lecture":
@@ -940,7 +981,15 @@ class Conversation:
             if self._mesure:  # la réponse précédente n'a jamais été jouée : on la note quand même
                 self._terminer_mesure()
             mesure = self._mesure = MesureReponse(tour, modele=getattr(self.cerveau, "modele", None))
-            journal.noter("toi", texte)
+            # Le journal ne garde pas l'image : seulement qu'il y en avait une.
+            images = tour.images if tour else []
+            if len(images) == 1:
+                texte_journal = f"{texte} [image collée]"
+            elif images:
+                texte_journal = f"{texte} [{len(images)} images collées]"
+            else:
+                texte_journal = texte
+            journal.noter("toi", texte_journal)
             await self.envoyer(type="etat", etat="reflechit")
         a_parle = False
         dites: list[str] = []  # les phrases données par le cerveau
@@ -1012,7 +1061,9 @@ class Conversation:
         try:
             # La note est prise au dernier moment : ce qu'elle retire de la file part avec ce tour.
             note = None if systeme else self._note_pour_le_tour()
-            async for morceau in self.cerveau.repondre(texte, systeme=systeme, note=note):
+            # Les images seulement s'il y en a : le cerveau du banc d'essai et des tests n'en prend pas.
+            avec_images = {"images": tour.images} if tour and tour.images and not systeme else {}
+            async for morceau in self.cerveau.repondre(texte, systeme=systeme, note=note, **avec_images):
                 if mesure:
                     mesure.envoi, mesure.premier_token = self.cerveau.envoi, self.cerveau.premier_token
                 if isinstance(morceau, RECHERCHE):

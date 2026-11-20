@@ -54,6 +54,8 @@ class Tour:
     # celle de l'audio de la fin du dernier mot (None si elle n'est plus dans le tampon).
     recu: float | None = None
     fin_parole: float | None = None
+    # Message tapé : les images collées avec (captures d'écran), {"data": base64, "mimeType": ...}.
+    images: list[dict] = field(default_factory=list)
 
 
 def coupure_recuperable(code: int | None, raison: str = "") -> bool:

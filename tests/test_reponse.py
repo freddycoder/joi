@@ -255,3 +255,74 @@ def test_phrase_d_attente_hors_du_journal_meme_si_le_cerveau_la_redit(fausse_voi
                for l in f.read_text(encoding="utf-8").splitlines()]
     joi, = [e for e in entrees if e["qui"] == "joi"]
     assert joi["texte"] == "Laisse-moi me rappeler… Ton chat s'appelle Pixel."
+
+
+def test_images_collees_validees():
+    """Seules les images d'un type connu, pas trop grosses, passent ; IMAGES_PAR_MESSAGE au plus."""
+    png = {"data": "iVBORw0KGgo=", "mimeType": "image/png"}
+    assert serveur.images_valides(None) == []
+    assert serveur.images_valides("pas une liste") == []
+    assert serveur.images_valides([png, {"data": "x", "mimeType": "text/html"}, {"mimeType": "image/png"},
+                                   {"data": "x" * (serveur.TAILLE_IMAGE_MAX + 1), "mimeType": "image/png"},
+                                   "x"]) == [png]
+    assert len(serveur.images_valides([png] * 9)) == serveur.IMAGES_PAR_MESSAGE
+
+
+def test_capture_collee_jointe_au_message(fausse_voix):
+    """Un message tapé avec une capture : le cerveau la reçoit, le journal note seulement qu'il y en avait une."""
+    import json
+
+    from joi import config
+
+    recues = []
+
+    class CerveauQuiVoit(FauxCerveau):
+        async def repondre(self, texte, systeme=False, note=None, images=None):
+            recues.append((texte, images))
+            async for phrase in super().repondre(texte, systeme, note):
+                yield phrase
+
+    async def scenario():
+        conversation, navigateur = _conversation([(0, "Je vois une erreur.")])
+        conversation.cerveau = CerveauQuiVoit(conversation.cerveau.phrases)
+        png = {"data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        await conversation.traiter_commande(json.dumps({"type": "texte", "texte": "", "images": [png]}))
+        await conversation.tache_reponse
+        return png
+
+    png = asyncio.run(scenario())
+    assert recues == [(serveur.TEXTE_SANS_MOTS, [png])]
+    entrees = [json.loads(l) for f in config.DOSSIER_JOURNAL.glob("*.jsonl")
+               for l in f.read_text(encoding="utf-8").splitlines()]
+    toi, = [e for e in entrees if e["qui"] == "toi"]
+    assert toi["texte"] == f"{serveur.TEXTE_SANS_MOTS} [image collée]"
+    assert "iVBOR" not in json.dumps(entrees)
+
+
+def test_cerveau_joint_les_images_au_message():
+    """Cerveau.repondre passe les images au SDK en pièces jointes « blob » (et rien sans image)."""
+    from joi import cerveau
+
+    envois = []
+
+    class FausseSession:
+        def __init__(self, c):
+            self.c = c
+
+        async def send(self, texte, **options):
+            envois.append((texte, options))
+            self.c._file.put_nowait(cerveau.FIN_DE_REPONSE)
+
+    async def scenario():
+        c = cerveau.Cerveau(avec_compte=False)
+        c._session = FausseSession(c)
+        png = {"data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        assert [p async for p in c.repondre("Regarde.", images=[png])] == []
+        assert [p async for p in c.repondre("Et là ?")] == []
+
+    asyncio.run(scenario())
+    assert envois == [
+        ("Regarde.", {"attachments": [{"type": "blob", "data": "iVBORw0KGgo=", "mimeType": "image/png",
+                                       "displayName": "capture-1"}]}),
+        ("Et là ?", {"attachments": None}),
+    ]
