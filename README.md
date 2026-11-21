@@ -53,8 +53,11 @@ derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'holog
 **Latence.** Chaque réponse ajoute une ligne « Latence : » au journal technique, et le bloc « Latence » du
 monitoring montre la dernière réponse et la médiane : fin de tour (AssemblyAI décide que tu as fini de
 parler), cerveau (premier mot, première phrase), synthèse de la voix, début de la lecture, et le total de
-la fin de ta phrase au premier son. La ligne dit aussi le modèle (« défaut » sans `JOI_MODELE`), les
-recherches et consultations du compte, et, après une phrase d'attente, quand la vraie réponse s'est fait entendre. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
+la fin de ta phrase au premier son. La ligne dit aussi le modèle (« défaut » sans `JOI_MODELE`, suivi
+du modèle qui a vraiment répondu d'après Copilot), les jetons du tour (entrée, sortie, réflexion), les
+recherches et consultations du compte, et, après une phrase d'attente, quand la vraie réponse s'est fait
+entendre. Chaque retour en écoute note sa raison (bouton, commande vocale, reprise après coupure) et le
+nombre de tours de la conversation. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
 `JOI_FIN_TOUR_SILENCE_MIN_MS` / `_MAX_MS` dans `.env` (vides : les valeurs d'AssemblyAI). Pour comparer
 les modèles Copilot, sans micro : `.venv\Scripts\python -m joi.banc MODELE1 MODELE2` (chaque phrase
 consomme une requête Copilot ; `--lister`, `--phrases N`). Il ne change pas `JOI_MODELE`.
@@ -222,7 +225,9 @@ En conversation, elle peut :
 
 Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches : ce contexte
 est préparé au démarrage et rafraîchi toutes les 5 minutes (quand personne n'est là, les nouveaux
-courriels sont alors notés sans annonce), pour qu'elle se réveille sans attendre Microsoft. Pendant la
+courriels sont alors notés sans annonce), pour qu'elle se réveille sans attendre Microsoft. Un contexte
+du même jour de moins de 30 minutes sert tel quel (« vu à … ») et se rafraîchit pendant qu'elle parle :
+au pire, un courriel ou un rendez-vous de la dernière demi-heure manque à sa première phrase. Pendant la
 conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
 ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
 « Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que

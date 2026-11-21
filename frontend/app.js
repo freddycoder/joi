@@ -279,7 +279,7 @@ function appliquerMode(nouveau) {
 $("mode").addEventListener("click", () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   $("mode").disabled = true; // jusqu'à la confirmation du serveur
-  ws.send(JSON.stringify({ type: "mode", mode: mode === "ecoute" ? "conversation" : "ecoute" }));
+  ws.send(JSON.stringify({ type: "mode", mode: mode === "ecoute" ? "conversation" : "ecoute", raison: "bouton" }));
 });
 
 // ---------- Connexion au serveur ----------
@@ -382,7 +382,7 @@ function reprendreApresCoupure(modeServeur) {
   reprise = null;
   afficherErreur("Liaison rétablie.");
   if (modeVoulu === "ecoute" && modeServeur !== "ecoute") {
-    ws.send(JSON.stringify({ type: "mode", mode: "ecoute" }));
+    ws.send(JSON.stringify({ type: "mode", mode: "ecoute", raison: "reprise après coupure" }));
     relancerCompteurEnregistrement();
     return true;
   }

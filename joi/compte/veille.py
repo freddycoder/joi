@@ -2,7 +2,7 @@
 
 - contexte_reveil() : la section « Ton compte » du prompt au réveil (date du jour, courriels non lus,
   ta journée et celle de Joi, ses tâches). Elle vient du dernier contexte gardé en mémoire s'il a moins
-  de RAFRAICHIR_MINUTES + 1 min (préparé au démarrage du serveur, rafraîchi toutes les RAFRAICHIR_MINUTES
+  de CACHE_SERVI_MAX, du même jour (préparé au démarrage du serveur, rafraîchi toutes les RAFRAICHIR_MINUTES
   par joi/serveur.py, et en fond après un réveil) : Joi se réveille sans attendre Graph. Sinon, on le
   demande, les blocs en parallèle : 5 s au plus, sinon Joi se réveille sans.
 - verifier() : les courriels arrivés depuis la dernière fois. Chacun entre au journal (en résumé) une
@@ -34,9 +34,13 @@ PREMIERE_FOIS = timedelta(days=1)  # sans état : les courriels des dernières 2
 MARGE = timedelta(minutes=5)  # on redemande un peu avant le dernier vu (les doublons sont écartés)
 VUS_GARDES = 300
 # Le contexte du réveil est rafraîchi à ce rythme, à part de la vérification des courriels
-# (JOI_COURRIEL_VERIFIER_MINUTES, qui peut être d'une heure) : il sert RAFRAICHIR_MINUTES + MARGE_CACHE.
+# (JOI_COURRIEL_VERIFIER_MINUTES, qui peut être d'une heure).
 RAFRAICHIR_MINUTES = 5
-MARGE_CACHE = timedelta(minutes=1)
+# Un contexte gardé du même jour sert tant qu'il a moins de CACHE_SERVI_MAX, avec son heure (« vu à »),
+# et se rafraîchit en fond. Avec 6 min, le premier réveil du matin ou un réveil après une mise en veille
+# attendait Graph (2,5 à 2,9 s) ; au pire, un courriel ou un rendez-vous de la dernière demi-heure manque
+# à la première phrase.
+CACHE_SERVI_MAX = timedelta(minutes=30)
 # Le compte n'est dit « déconnecté » que si les échecs durent depuis tout ce temps : le 20 novembre,
 # une coupure d'une minute (six échecs en rafale) a donné un contexte « déconnecté », puis tout est revenu
 # seul. C'est le temps qui compte, pas le nombre d'échecs : un réveil et une fin de conversation
@@ -153,7 +157,7 @@ class Veille:
         instant = maintenant()
         if cache.quand.date() != instant.date():  # « aujourd'hui » a changé
             return None
-        if instant - cache.quand > timedelta(minutes=RAFRAICHIR_MINUTES) + MARGE_CACHE:
+        if instant - cache.quand > CACHE_SERVI_MAX:
             return None
         return cache
 

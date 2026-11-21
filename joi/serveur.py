@@ -7,6 +7,8 @@ Protocole du WebSocket /ws entre le navigateur et le serveur :
     {"type": "texte", "texte": "..."}        message tapé au clavier (au lieu de parler) ; ignoré en mode écoute
       + "images": [{"data", "mimeType"}]     facultatif : images collées (captures d'écran), en base64
     {"type": "mode", "mode": "..."}          demande de changer de mode : conversation | ecoute
+      + "raison": "..." facultatif : pourquoi (bouton, reprise après coupure), pour le journal
+    {"type": "onglet", "etat": "..."}        en écoute : onglet caché ou visible, verrou d'éveil relâché
                                              (on peut aussi le dire : voir joi/commande_vocale.py)
     {"type": "lecture", "en_cours": bool}    la voix de Joi commence ou finit de jouer dans le
                                              haut-parleur (pour ne pas apprendre sa voix comme la tienne)
@@ -404,6 +406,8 @@ class MesureReponse:
         self.lecture: float | None = None
         self.recherches = 0
         self.reponse_finie = False
+        # Ce que le SDK dit du tour (ASSISTANT_USAGE) : le modèle qui a vraiment répondu et ses jetons.
+        self.usage: dict = {}
 
     @staticmethod
     def _ecart(a: float | None, b: float | None) -> float | None:
@@ -422,8 +426,18 @@ class MesureReponse:
             "recherches": self.recherches,
             "consultations": self.consultations,
             "vraie_reponse": self._ecart(debut, self.son_reponse) if self.attente else None,
-            "modele": self.modele or "défaut",
+            "modele": self._modele(),
+            "jetons": {k: self.usage[k] for k in ("entree", "sortie", "reflexion", "cache", "appels")
+                       if k in self.usage} or None,
+            "premier_jeton_s": self.usage.get("premier_jeton_s"),
         }
+
+    def _modele(self) -> str:
+        """« défaut (gpt-…) » : le réglage, puis le modèle qui a vraiment répondu s'il est connu."""
+        reel = self.usage.get("modele")
+        demande = self.modele or "défaut"
+        details = [d for d in (reel if reel != self.modele else None, self.usage.get("effort")) if d]
+        return f"{demande} ({', '.join(details)})" if details else demande
 
     def ligne(self) -> str:
         r = self.resume()
@@ -438,6 +452,10 @@ class MesureReponse:
                 f"lecture {s('lecture')} · total {s('total')} ({debut} → premier son)"
                 + (f" · vraie réponse {s('vraie_reponse')} (après la phrase d'attente)" if self.attente else "")
                 + f" · modèle {r['modele']}"
+                + (" · jetons " + ", ".join(f"{nom} {r['jetons'][k]}" for k, nom in
+                                            (("entree", "entrée"), ("sortie", "sortie"),
+                                             ("reflexion", "réflexion"), ("appels", "appels"))
+                                            if k in r["jetons"]) if r["jetons"] else "")
                 + (f" · {r['recherches']} recherche(s)" if r["recherches"] else "")
                 + (f" · {r['consultations']} consultation(s) du compte" if r["consultations"] else ""))
 
@@ -551,6 +569,11 @@ class Conversation:
         # Les journées dont une écoute vient d'être apprise : Joi le sait (et peut le dire) dès qu'elle
         # est inactive et que l'apprentissage est fini.
         self._journees_apprises: set[str] = set()
+        # Ce qui a ouvert la conversation en cours, et combien de tours la personne y a dit : écrit au
+        # journal au retour en écoute. Le 20 novembre, deux « Joi, reviens » sont repassés en écoute
+        # 8 à 10 s plus tard sans un mot, et rien ne disait pourquoi.
+        self._ouverte_par = "connexion"
+        self._tours_conversation = 0
         self.tache_annonces: asyncio.Task | None = None
 
     def _nouvelles_oreilles(self) -> Oreilles:
@@ -665,7 +688,8 @@ class Conversation:
             if (texte or images) and self.mode == "conversation":
                 await self.sur_tour(Tour(texte or TEXTE_SANS_MOTS, True, -1, images=images))
         elif genre == "mode" and commande.get("mode") in ("conversation", "ecoute"):
-            await self.changer_mode(commande["mode"])
+            raison = re.sub(r"[^\w ,'-]", "", str(commande.get("raison") or "page"))[:40]
+            await self.changer_mode(commande["mode"], raison=raison or "page")
         elif genre == "lecture":
             self._noter_lecture(bool(commande.get("en_cours")))
 
@@ -738,24 +762,28 @@ class Conversation:
         except Exception as e:
             log.warning("Empreinte de ta voix non mise à jour : %s", e)
 
-    async def changer_mode(self, mode: str) -> None:
+    async def changer_mode(self, mode: str, raison: str = "?") -> None:
+        """raison : ce qui demande le changement (bouton, commande vocale…), pour le journal."""
         # Le bouton et la voix peuvent demander un changement en même temps : un seul à la fois.
         async with self._verrou_mode:
             if mode != self.mode:
                 if mode == "ecoute":
+                    log.info("Retour en écoute (%s) : conversation ouverte par %s, %d tour(s) de la personne.",
+                             raison, self._ouverte_par, self._tours_conversation)
                     await self._passer_en_ecoute()
                 else:
+                    self._ouverte_par, self._tours_conversation = raison, 0
                     await self._revenir_en_conversation()
             await self.envoyer(type="mode", mode=self.mode)
 
-    def _basculer_en_fond(self, mode: str, confirmation: str | None = None) -> None:
+    def _basculer_en_fond(self, mode: str, confirmation: str | None = None, raison: str = "?") -> None:
         """Change de mode dans une tâche à part : une commande vocale arrive des oreilles (ou du
         détecteur), qu'on doit justement fermer pendant le changement."""
         if self.tache_bascule and not self.tache_bascule.done():
             return
 
         async def basculer() -> None:
-            await self.changer_mode(mode)
+            await self.changer_mode(mode, raison=raison)
             if confirmation and self.mode == mode:
                 await self.dire_seule(confirmation)
 
@@ -763,7 +791,7 @@ class Conversation:
 
     async def _retour_vocal(self) -> None:
         # Joi confirme à voix haute : on ne regarde pas forcément l'écran quand on la rappelle.
-        self._basculer_en_fond("conversation", confirmation="Je suis là.")
+        self._basculer_en_fond("conversation", confirmation="Je suis là.", raison="« Joi, reviens »")
 
     async def dire_seule(self, phrase: str) -> None:
         """Une courte phrase de Joi, hors d'une réponse du cerveau."""
@@ -966,8 +994,9 @@ class Conversation:
         self._apprendre_ma_voix(tour)
         if commande_vocale.demande_ecoute(tour.texte):
             log.info("Commande vocale : « %s »", tour.texte)
-            self._basculer_en_fond("ecoute")
+            self._basculer_en_fond("ecoute", raison="commande « écoute seulement »")
             return
+        self._tours_conversation += 1
         interruption = self._interrompre_en_fond()
         self.tache_reponse = asyncio.create_task(self._repondre_apres(interruption, tour))
 
@@ -1156,6 +1185,9 @@ class Conversation:
             if mesure:
                 mesure.recherches = recherches
                 mesure.consultations = consultations
+                # L'usage de CE tour, copié tout de suite : la mesure peut n'être notée qu'à la réponse
+                # suivante (lecture pas signalée), et un message système glissé entre-temps le remplacerait.
+                mesure.usage = dict(getattr(self.cerveau, "usage", None) or {})
                 mesure.reponse_finie = True
                 # Sans son, ou déjà en lecture : rien de plus à attendre du navigateur.
                 if self._mesure is mesure and (mesure.mp3_envoye is None or mesure.lecture is not None):

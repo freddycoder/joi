@@ -57,6 +57,19 @@ def faux():
     return FauxLent()
 
 
+@pytest.fixture(autouse=True)
+def midi(monkeypatch):
+    """Midi, toujours : reculer le contexte gardé de 20 ou 31 min ne doit pas le faire tomber la veille
+    quand les tests tournent juste après minuit."""
+    instant = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+    debut = datetime.now().astimezone()
+
+    def maintenant_fige():
+        return instant + (datetime.now().astimezone() - debut)
+
+    monkeypatch.setattr(veille, "maintenant", maintenant_fige)
+
+
 def test_premier_contexte_en_parallele(faux):
     v = veille.Veille(faux)
     debut = time.monotonic()
@@ -99,7 +112,7 @@ def test_cache_trop_vieux_ou_d_hier(faux):
     async def scenario():
         v = veille.Veille(faux)
         await v.preparer()
-        v._cache.quand -= timedelta(minutes=7)  # plus de RAFRAICHIR_MINUTES + 1
+        v._cache.quand -= timedelta(minutes=31)  # plus de CACHE_SERVI_MAX
         faux.appels.clear()
         await v.contexte_reveil()
         vieux = sorted(faux.appels)
@@ -409,3 +422,21 @@ def test_jeton_erreur_reseau_un_second_essai_puis_ne_repond_pas(monkeypatch):
         _microsoft(app, monkeypatch)._jeton()
     assert not isinstance(e.value, CompteDeconnecte)
     assert app.appels == 2
+
+
+def test_contexte_de_20_min_servi_sans_attente(faux):
+    """Plan Joi fiable, partie 4 : moins de CACHE_SERVI_MAX (30 min), le contexte gardé sert tout de suite."""
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        v._cache.quand -= timedelta(minutes=20)
+        faux.appels.clear()
+        debut = time.monotonic()
+        texte = await v.contexte_reveil()
+        duree = time.monotonic() - debut
+        await v.attendre_rafraichissement()
+        return texte, duree
+
+    texte, duree = asyncio.run(scenario())
+    assert duree < PAUSE / 2
+    assert "## Ton compte (vu à" in texte

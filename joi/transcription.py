@@ -38,6 +38,7 @@ Tout ce qui échoue (réseau, Copilot, arrêt de Joi) est repris au prochain app
 """
 
 import asyncio
+from collections import Counter
 import json
 import logging
 import time
@@ -124,9 +125,11 @@ async def transcrire_en_attente() -> None:
     monitoring.transcription["cout"] += cout
     monitoring.transcription["segments"] += reussis
     monitoring.transcription["derniere"] = datetime.now().isoformat(timespec="seconds")
+    modeles = Counter(segment["modele"] for _, _, segment in a_faire if segment.get("modele"))
     log.info(
-        "Écoute transcrite : %d segment(s) sur %d, %.2f h d'audio facturées, environ %.2f $ US (%.0f s)",
+        "Écoute transcrite : %d segment(s) sur %d, %.2f h d'audio facturées, environ %.2f $ US (%.0f s)%s",
         reussis, len(a_faire), secondes / 3600, cout, time.perf_counter() - debut,
+        f", modèle {modeles.most_common(1)[0][0]}" if modeles else "",
     )
     noter_cout_des_jours({segment["debut"][:10] for _, _, segment in a_faire if segment.get("debut")})
 
@@ -184,6 +187,8 @@ async def _transcrire_segment(
             await _effacer_chez_assemblyai(client, resultat.get("id"))
             facture = _facture(resultat, segment)
             segment["cout"] = round(facture[1], 4)  # enregistré avec le manifeste, pour le coût du jour
+            # Le modèle facturé, tel qu'AssemblyAI le dit : la preuve que le modèle voulu sert vraiment.
+            segment["modele"] = resultat.get("speech_model_used") or "inconnu"
 
         voix = await _reconnaitre_voix(mp3, segment, resultat)
         entrees = entrees_du_segment(segment, resultat, voix)

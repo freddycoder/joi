@@ -481,3 +481,32 @@ def test_page_cachee_ecrite_au_journal_en_ecoute(caplog):
     messages = [r.getMessage() for r in caplog.records if "Écoute : page" in r.getMessage()]
     assert messages == ["Écoute : page verrou d'éveil relâché.", "Écoute : page scriptfaux."]
     assert conversation._derniere_activite == avant  # l'état de la page n'est pas une activité
+
+
+# --- Plan Joi fiable, partie 4 : pourquoi Joi repasse en écoute -------------------------------------
+
+def test_retour_en_ecoute_dit_sa_raison_et_les_tours(caplog, monkeypatch):
+    import json
+    import logging
+
+    async def scenario():
+        conversation = serveur.Conversation(FauxNavigateur())
+
+        async def passer():
+            conversation.mode = "ecoute"
+
+        async def revenir():
+            conversation.mode = "conversation"
+
+        monkeypatch.setattr(conversation, "_passer_en_ecoute", passer)
+        monkeypatch.setattr(conversation, "_revenir_en_conversation", revenir)
+        with caplog.at_level(logging.INFO, logger="joi.serveur"):
+            await conversation.changer_mode("ecoute", raison="bouton")
+            await conversation.changer_mode("conversation", raison="« Joi, reviens »")
+            await conversation.traiter_commande(json.dumps({"type": "mode", "mode": "ecoute", "raison": "bouton"}))
+
+    asyncio.run(scenario())
+    lignes = [r.getMessage() for r in caplog.records if "Retour en écoute" in r.getMessage()]
+    assert lignes[0] == "Retour en écoute (bouton) : conversation ouverte par connexion, 0 tour(s) de la personne."
+    assert lignes[1] == ("Retour en écoute (bouton) : conversation ouverte par « Joi, reviens », "
+                         "0 tour(s) de la personne.")
