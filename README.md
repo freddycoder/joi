@@ -119,7 +119,11 @@ lui donne le résumé complet de cette journée. Si tu lui parles avant, elle sa
 n'est pas fini : elle cherche ce qui est déjà appris et dit ce qui manque encore, sans l'inventer.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
-Garde l'onglet ouvert et branche le portable.
+Garde l'onglet ouvert et branche le portable. Si l'audio s'arrête quand même (micro débranché, onglet
+gelé), l'alerte se répète au journal et à la page (à 35 s, à 5 min, puis toutes les 15 min). Le journal
+note aussi quand l'onglet est caché ou que le verrou d'éveil est relâché. La fin de l'écoute donne la
+durée de la séance et les plages sans audio. Une plage de plus de 5 min est dite à Joi au retour et
+notée dans la journée.
 
 **Coupures.** Si la liaison avec le serveur tombe (Joi relancée, portable sorti de veille), la page se
 reconnecte seule, sans clic, et reprend l'écoute : l'indicateur rouge clignote et affiche « interrompu »

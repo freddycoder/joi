@@ -340,7 +340,11 @@ def test_conversation_signale_le_silence_en_ecoute(caplog):
     instant = [1000.0]
 
     class FauxEnregistreur:
-        pass
+        def __init__(self):
+            self.trous = []
+
+        def ouvrir_trou(self, debut):
+            self.trous.append(debut)
 
     async def scenario():
         navigateur = FauxNavigateur()
@@ -437,3 +441,43 @@ def test_fin_de_tour_envoyee_seulement_si_reglee(monkeypatch):
     sans, avec = chemins
     assert "mode=" not in sans and "turn_silence" not in sans  # comme avant : les valeurs d'AssemblyAI
     assert "mode=min_latency" in avec and "min_turn_silence=160" in avec and "max_turn_silence=900" in avec
+
+
+# --- Plan Joi fiable, partie 3 : une écoute muette qui se voit -------------------------------------
+
+def test_garde_fou_alertes_repetees():
+    """À 35 s, à 5 min, puis toutes les 15 min (20 et 35 min) ; plus rien après le retour de l'audio."""
+    instant = [0.0]
+    garde = serveur.GardeFouSilence(seuil_s=30, horloge=lambda: instant[0])
+    alertes = []
+    for t in range(0, 2200, 5):
+        instant[0] = t
+        if garde.verifier() is not None:
+            alertes.append(t)
+    assert alertes == [35, 305, 1205, 2105]
+    instant[0] = 2200
+    assert garde.audio_recu() == 2200
+    instant[0] = 2220
+    assert garde.verifier() is None
+    instant[0] = 2235
+    assert garde.verifier() == 35  # un nouveau trou : le calendrier repart de zéro
+
+
+def test_page_cachee_ecrite_au_journal_en_ecoute(caplog):
+    import json
+    import logging
+
+    async def scenario():
+        conversation = serveur.Conversation(FauxNavigateur())
+        avant = conversation._derniere_activite
+        with caplog.at_level(logging.INFO, logger="joi.serveur"):
+            await conversation.traiter_commande(json.dumps({"type": "onglet", "etat": "cachee"}))
+            conversation.mode = "ecoute"
+            await conversation.traiter_commande(json.dumps({"type": "onglet", "etat": "verrou d'éveil relâché"}))
+            await conversation.traiter_commande(json.dumps({"type": "onglet", "etat": "<script>\nfaux"}))
+        return conversation, avant
+
+    conversation, avant = asyncio.run(scenario())
+    messages = [r.getMessage() for r in caplog.records if "Écoute : page" in r.getMessage()]
+    assert messages == ["Écoute : page verrou d'éveil relâché.", "Écoute : page scriptfaux."]
+    assert conversation._derniere_activite == avant  # l'état de la page n'est pas une activité

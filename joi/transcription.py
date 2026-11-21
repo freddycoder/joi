@@ -378,6 +378,7 @@ async def consolider() -> None:
             deja_en_partie=any(s.get("etat") == "consolide" for s in manifeste["segments"]),
             voix_reconnues=voix_reconnues,
             legende_voix=legende,
+            trous=trous_a_dire(manifeste),
         ))
     if ecoutes:
         await memoire.consolider_ecoute(ecoutes)
@@ -476,6 +477,12 @@ async def reconsolider_journee(jour: str) -> None:
             correction=True,
         ))
     await memoire.consolider_ecoute(ecoutes)
+
+
+def trous_a_dire(manifeste: dict, minimum_s: float = enregistreur.TROU_A_DIRE_S) -> list[tuple[str, str]]:
+    """Les plages sans audio d'une séance (garde-fou du serveur), d'au moins `minimum_s`, en « HH:MM »."""
+    return [(t["debut"][11:16], t["fin"][11:16]) for t in manifeste.get("trous") or []
+            if t.get("fin") and (t.get("duree_s") or 0) >= minimum_s]
 
 
 def _journee_terminee(jour: str) -> bool:

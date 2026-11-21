@@ -105,6 +105,10 @@ def seances_terminees(dossier: Path | None = None) -> list[tuple[Path, dict]]:
     return [(chemin, manifeste) for chemin, manifeste, active in seances(dossier) if not active]
 
 
+# Un trou d'écoute (plus aucun audio) plus long que ça est dit à Joi au retour, et à la bibliothécaire.
+TROU_A_DIRE_S = 300
+
+
 class Enregistreur:
     """Une séance d'écoute. ecrire() reçoit le PCM du micro, fermer() finalise le tout.
 
@@ -163,17 +167,51 @@ class Enregistreur:
                 except Exception:
                     log.exception("Fin de segment mal signalée")
 
+    def ouvrir_trou(self, debut: datetime) -> None:
+        """Plus aucun audio n'arrive depuis `debut` (garde-fou du serveur) : noté dans le manifeste,
+        pour la ligne de fin, la note de retour de Joi et la bibliothécaire. Un trou déjà ouvert reste."""
+        if not self.ouvert:
+            return
+        trous = self.manifeste.setdefault("trous", [])
+        if trous and trous[-1].get("fin") is None:
+            return
+        trous.append({"debut": debut.isoformat(timespec="seconds"), "fin": None, "duree_s": 0})
+        self._sauver_manifeste()
+
+    def fermer_trou(self, fin: datetime) -> tuple[datetime, datetime] | None:
+        """L'audio revient (ou l'écoute finit) : ferme le trou ouvert. Rend (début, fin), ou None."""
+        trous = self.manifeste.get("trous") or []
+        if not trous or trous[-1].get("fin") is not None:
+            return None
+        trou = trous[-1]
+        debut = datetime.fromisoformat(trou["debut"])
+        fin = fin.replace(microsecond=0)  # comme dans le manifeste : le même trou, relu, est égal
+        trou["fin"] = fin.isoformat(timespec="seconds")
+        trou["duree_s"] = round(max(0.0, (fin - debut).total_seconds()))
+        if self.ouvert:
+            self._sauver_manifeste()
+        return debut, fin
+
     def fermer(self) -> None:
         if not self.ouvert:
             return
         try:
             self._vider_tampon()
             self._finir_segment()
-            self.manifeste["fin"] = datetime.now().isoformat(timespec="seconds")
+            fin = datetime.now()
+            self.fermer_trou(fin)  # un trou encore ouvert finit avec l'écoute
+            self.manifeste["fin"] = fin.isoformat(timespec="seconds")
             self._sauver_manifeste()
             duree = sum(s["duree_s"] for s in self.manifeste["segments"])
-            log.info("Écoute terminée : %d segment(s), %.1f min d'audio",
-                     len(self.manifeste["segments"]), duree / 60)
+            seance = (fin - datetime.fromisoformat(self.manifeste["debut"])).total_seconds()
+            trous = self.manifeste.get("trous", [])
+            sans_audio = sum(t["duree_s"] for t in trous)
+            # La durée de la séance à côté de l'audio : un écart (micro coupé, portable en veille) se voit.
+            log.info("Écoute terminée : %d segment(s), %.1f min d'audio sur %.0f min de séance%s",
+                     len(self.manifeste["segments"]), duree / 60, seance / 60,
+                     f", {sans_audio / 60:.0f} min sans audio ("
+                     + ", ".join(f"{t['debut'][11:16]} → {t['fin'][11:16]}" for t in trous) + ")"
+                     if trous else "")
         finally:
             _seances_actives.pop(self.fichier_manifeste.resolve(), None)
             self.fichier_manifeste = None

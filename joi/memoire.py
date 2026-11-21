@@ -23,7 +23,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -678,6 +678,9 @@ class Ecoute:
     # Une écoute déjà transmise (avec les étiquettes A/B), transmise à nouveau avec les voix
     # reconnues : la bibliothécaire corrige ce qu'elle en avait tiré au lieu de l'ajouter.
     correction: bool = False
+    # Les plages sans audio (micro ou onglet coupé), « HH:MM » : la journée doit le dire, sinon un trou
+    # de 95 min passe pour un moment calme.
+    trous: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]]]:
@@ -771,6 +774,11 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                                   "déjà dans le résumé de la journée, ne le répète pas.")
                     if ecoute.en_cours:
                         suite += " L'écoute continue : la suite te sera transmise plus tard."
+                    if ecoute.trous:
+                        plages = ", ".join(f"de {d} à {f}" for d, f in ecoute.trous)
+                        suite += (f" Rien n'a été enregistré {plages} (micro ou onglet coupé) : dis-le en une "
+                                  "ligne dans le résumé de la journée"
+                                  + (", si ce n'est pas déjà noté." if ecoute.deja_en_partie else "."))
                     if ecoute.voix_reconnues:
                         suite += (" Les voix ont été reconnues à leur empreinte vocale (voir « Voix reconnues » "
                                   "dans tes consignes).")

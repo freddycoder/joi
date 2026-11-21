@@ -30,7 +30,9 @@ Les coupures :
   - AssemblyAI ferme la session (3 h au plus, erreur, réseau) : en conversation, de nouvelles oreilles
     avec un délai croissant (_reconnecter_oreilles), annoncé par un message « erreur » ;
   - en écoute, plus aucun audio pendant SILENCE_MAX_ECOUTE secondes alors que le WebSocket est
-    ouvert (micro coupé, onglet gelé) : message « erreur » et avertissement au journal technique.
+    ouvert (micro coupé, onglet gelé) : message « erreur » et avertissement au journal technique,
+    répétés à 5 min puis toutes les 15 min ; le trou va au manifeste, et un trou de plus de 5 min est
+    dit à Joi au prochain tour de la personne (« [écoute coupée] ») et à la bibliothécaire.
 
 Routes HTTP du tableau de bord (panneaux latéraux de l'interface, voir joi/monitoring.py) :
     GET /api/parametres     les réglages en vigueur (sans la clé API)
@@ -81,7 +83,7 @@ import re
 import time
 from collections import Counter, deque
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -90,7 +92,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import commande_vocale, config, empreintes, enregistreur, journal, memoire, monitoring, transcription, voix
 from .cerveau import CONSULTATION, RECHERCHE, Cerveau, arreter_client_partage, client_partage
-from .enregistreur import OCTETS_PAR_SECONDE, Enregistreur
+from .enregistreur import OCTETS_PAR_SECONDE, TROU_A_DIRE_S, Enregistreur
 from .oreilles import Oreilles, Tour
 
 log = logging.getLogger("joi.serveur")
@@ -152,6 +154,14 @@ DELAIS_RECONNEXION = (1, 2, 5, 10, 30)
 # onglet gelé) : au-delà de ce silence total, en secondes, on le dit au navigateur et au journal.
 SILENCE_MAX_ECOUTE = 30
 INTERVALLE_GARDE_SILENCE = 5
+# L'alerte se répète (à 5 min, puis toutes les 15 min) : le 20 novembre, une seule alerte à 35 s, envoyée
+# à un onglet gelé, et 95 min d'écoute perdues sans que personne le sache.
+SILENCE_DEUXIEME_ALERTE = 300
+SILENCE_ALERTES_ENSUITE = 900
+# Les trous de la dernière écoute à dire à Joi, une fois. Au niveau du module : une écoute qui finit
+# parce que la page s'est déconnectée (onglet gelé, portable en veille) est dite à la conversation qui
+# suit la reconnexion.
+_trous_a_dire: list[tuple[datetime, datetime]] = []
 
 # Tâches de fond (consolidation de la mémoire) : on garde une référence pour qu'elles aillent au bout.
 _taches_de_fond: set[asyncio.Task] = set()
@@ -433,33 +443,41 @@ class MesureReponse:
 
 
 class GardeFouSilence:
-    """Retient l'instant du dernier paquet audio reçu. verifier() le signale une fois quand le
-    silence total dépasse le seuil ; audio_recu() dit, une fois, combien de temps il a duré quand
-    l'audio revient. L'horloge est injectable pour les tests."""
+    """Retient l'instant du dernier paquet audio reçu. verifier() le signale quand le silence total
+    dépasse le seuil, puis à SILENCE_DEUXIEME_ALERTE, puis toutes les SILENCE_ALERTES_ENSUITE ;
+    audio_recu() dit, une fois, combien de temps il a duré quand l'audio revient. L'horloge est
+    injectable pour les tests."""
 
     def __init__(self, seuil_s: float = SILENCE_MAX_ECOUTE, horloge: Callable[[], float] = time.monotonic):
         self.seuil_s = seuil_s
         self._horloge = horloge
         self.dernier_audio = horloge()
         self.en_alerte = False
+        self._prochaine = seuil_s  # l'absence (en s) à laquelle partira la prochaine alerte
 
     def reprendre(self) -> None:
         """Une nouvelle écoute commence : le compte repart de zéro."""
         self.dernier_audio = self._horloge()
         self.en_alerte = False
+        self._prochaine = self.seuil_s
 
     def audio_recu(self) -> float | None:
         maintenant = self._horloge()
         absence, self.dernier_audio = maintenant - self.dernier_audio, maintenant
         if self.en_alerte:
             self.en_alerte = False
+            self._prochaine = self.seuil_s
             return absence
         return None
 
     def verifier(self) -> float | None:
         absence = self._horloge() - self.dernier_audio
-        if not self.en_alerte and absence > self.seuil_s:
+        if absence > self._prochaine:
             self.en_alerte = True
+            if self._prochaine < SILENCE_DEUXIEME_ALERTE:
+                self._prochaine = max(SILENCE_DEUXIEME_ALERTE, self.seuil_s)
+            else:
+                self._prochaine += SILENCE_ALERTES_ENSUITE
             return absence
         return None
 
@@ -599,6 +617,8 @@ class Conversation:
                     absence = self.garde_silence.audio_recu()
                     if absence is not None and self.mode == "ecoute":
                         log.info("Écoute : l'audio est revenu après %.0f s de silence total.", absence)
+                        if self.enregistreur:
+                            self._noter_trou(self.enregistreur.fermer_trou(datetime.now()))
                     if self.enregistreur:
                         self.enregistreur.ecrire(message["bytes"])
                         if self.detecteur_retour:
@@ -631,6 +651,13 @@ class Conversation:
     async def traiter_commande(self, brut: str) -> None:
         commande = json.loads(brut)
         genre = commande.get("type")
+        if genre == "onglet":
+            # L'état de la page (onglet caché, verrou d'éveil relâché) : seulement pour le journal, qui
+            # dira la cause d'un prochain trou d'écoute. Ce n'est pas une activité de la personne.
+            if self.mode == "ecoute":
+                etat = re.sub(r"[^\w ,'-]", "", str(commande.get("etat") or ""))[:60]
+                log.info("Écoute : page %s.", etat or "?")
+            return
         self._derniere_activite = time.monotonic()
         if genre == "texte":
             texte = str(commande.get("texte") or "").strip()
@@ -889,6 +916,8 @@ class Conversation:
         absence = self.garde_silence.verifier()
         if absence is None:
             return
+        # Le début du trou, en heure réelle, va dans le manifeste (une seule fois par trou).
+        self.enregistreur.ouvrir_trou(datetime.now() - timedelta(seconds=absence))
         log.warning("Écoute : aucun audio reçu depuis %.0f s (micro coupé ? onglet gelé ?).", absence)
         await self.signaler_erreur(f"Je n'entends plus rien depuis {absence:.0f} s : le micro est-il "
                                    "toujours branché ?")
@@ -907,7 +936,15 @@ class Conversation:
             enregistreur.fermer()
         except Exception:
             log.exception("Finalisation de l'enregistrement impossible")
+        for trou in enregistreur.manifeste.get("trous", []):  # un trou encore ouvert est fermé par fermer()
+            if trou.get("fin"):
+                self._noter_trou((datetime.fromisoformat(trou["debut"]), datetime.fromisoformat(trou["fin"])))
         return True
+
+    def _noter_trou(self, trou: tuple[datetime, datetime] | None) -> None:
+        """Un trou d'écoute fini : s'il est long, Joi le saura au prochain tour de la personne."""
+        if trou and (trou[1] - trou[0]).total_seconds() >= TROU_A_DIRE_S and trou not in _trous_a_dire:
+            _trous_a_dire.append(trou)
 
     async def sur_tour(self, tour: Tour) -> None:
         if self.mode != "conversation":
@@ -1159,6 +1196,14 @@ class Conversation:
             morceaux.append(
                 "[apprentissage fini] Tu as fini d'apprendre ce que tu as entendu : pour en parler, "
                 "cherche avec se_souvenir en nommant la journée.")
+        if _trous_a_dire:
+            trous = list(_trous_a_dire)
+            _trous_a_dire.clear()
+            plages = ", ".join(f"de {d:%H:%M} à {f:%H:%M}" for d, f in trous)
+            morceaux.append(
+                f"[écoute coupée] Pendant ta dernière écoute, tu n'as rien entendu {plages} (micro ou onglet "
+                "coupé). Si on te demande ce que tu as entendu, dis-le au lieu de laisser croire que "
+                "c'était calme.")
         if self._courriels_a_glisser:
             # Le nombre seulement, jamais l'expéditeur, le sujet ni l'aperçu : la note voyage dans le
             # tour de la personne, et rien d'écrit par un tiers ne doit y entrer. Joi lit les courriels

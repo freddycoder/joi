@@ -48,6 +48,15 @@ class FausseSession:
         asyncio.get_running_loop().create_task(produire())
 
 
+@pytest.fixture(autouse=True)
+def sans_trous_d_avant():
+    """Les trous à dire vivent au niveau du module (ils survivent à une reconnexion) : un test ne
+    laisse pas les siens au suivant."""
+    serveur._trous_a_dire.clear()
+    yield
+    serveur._trous_a_dire.clear()
+
+
 @pytest.fixture
 def conversation(monkeypatch):
     async def synthetiser(texte, infos=None):
@@ -178,3 +187,80 @@ def test_la_note_ne_compte_pas_comme_le_tour_de_la_personne(monkeypatch):
 
     assert asyncio.run(scenario()) == ["D'accord."]
     assert tours == ["Oui."]
+
+
+# --- Plan Joi fiable, partie 3 : un trou d'écoute dit au retour ------------------------------------
+
+def test_trou_long_dit_une_fois_au_retour(conversation):
+    from datetime import timedelta
+
+    debut = datetime(2026, 11, 20, 13, 10)
+    conversation._noter_trou((debut, debut + timedelta(minutes=96)))
+    conversation._noter_trou((debut, debut + timedelta(minutes=1)))  # trop court : pas dit
+    note = conversation._note_pour_le_tour()
+    assert "[écoute coupée]" in note and "de 13:10 à 14:46" in note
+    assert "de 13:10 à 13:11" not in note
+    assert conversation._note_pour_le_tour() is None  # une seule fois
+
+
+def test_fin_d_ecoute_avec_un_trou_ouvert(conversation, tmp_path):
+    from datetime import timedelta
+
+    from joi.enregistreur import Enregistreur
+
+    e = Enregistreur(dossier=tmp_path / "enr", duree_segment_s=60.0)
+    e.ouvrir()
+    e.ouvrir_trou(datetime.now() - timedelta(minutes=10))
+    conversation.enregistreur = e
+    assert conversation._arreter_enregistrement()
+    note = conversation._note_pour_le_tour()
+    assert note and "[écoute coupée]" in note
+
+
+def test_la_bibliotecaire_recoit_les_trous(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    messages = []
+
+    class Session:
+        async def send_and_wait(self, message, timeout=None):
+            messages.append(message)
+
+    @asynccontextmanager
+    async def fausse():
+        yield Session()
+
+    monkeypatch.setattr(memoire, "_bibliothecaire", fausse)
+    segment = memoire.SegmentEcoute(debut="2026-11-20T11:38:59",
+                                    entrees=[{"texte": f"phrase {i}", "locuteur": "toi"} for i in range(30)],
+                                    integre=lambda: None)
+    ecoute = memoire.Ecoute(debut="2026-11-20T11:38:59", fin="2026-11-20T14:46:03", segments=[segment],
+                            trous=[("13:10", "14:46")])
+    asyncio.run(memoire.consolider_ecoute([ecoute]))
+    assert messages and "Rien n'a été enregistré de 13:10 à 14:46" in messages[0]
+
+
+def test_trou_ferme_par_le_retour_de_l_audio_dit_une_seule_fois(conversation, tmp_path):
+    """L'audio revient (fin à la microseconde), puis l'écoute s'arrête (le manifeste relu à la seconde)."""
+    from datetime import timedelta
+
+    from joi.enregistreur import Enregistreur
+
+    e = Enregistreur(dossier=tmp_path / "enr", duree_segment_s=60.0)
+    e.ouvrir()
+    e.ouvrir_trou(datetime.now() - timedelta(minutes=10))
+    conversation.enregistreur = e
+    conversation._noter_trou(e.fermer_trou(datetime.now()))
+    assert conversation._arreter_enregistrement()
+    note = conversation._note_pour_le_tour()
+    assert note.count(" à ") == 1, note
+
+
+def test_le_trou_survit_a_une_reconnexion(conversation, monkeypatch):
+    from datetime import timedelta
+
+    debut = datetime(2026, 11, 20, 13, 10)
+    conversation._noter_trou((debut, debut + timedelta(minutes=96)))
+    suivante = serveur.Conversation(FauxNavigateur())  # la page s'est reconnectée
+    note = suivante._note_pour_le_tour()
+    assert note and "de 13:10 à 14:46" in note
