@@ -320,3 +320,58 @@ du réveil contient « À venir » et la consigne, une seule fois dans la journ�
   jour : utiles, mais pas prioritaires.
 - Pistes déjà notées : `compte.modele.externe()` n'échappe pas sa balise de fin ; `propositions.json`
   sans verrou entre processus ; un « plus tard » pour `marquer_proposition`.
+
+---
+
+## État au 2026-11-21 (fin de la session 1)
+
+Les parties 1 à 4 sont codées sur la branche `joi-fiable`, en 4 commits (plus celui du plan), avec
+285 tests (244 au départ ; `.venv\Scripts\python -m pytest`, une trentaine de secondes, jamais
+`donnees/`). La partie 5 (échéances) attend la session 2. Chaque partie a été relue par le
+sous-agent `joi-reviseur`, et la partie 2 l'a été deux fois.
+
+Vérifié pendant la session :
+- msal 1.39 : `acquire_token_silent_with_error` rend `None` (pas de jeton dans le cache) ou un dict
+  avec `error` et `error_description` ; `acquire_token_silent` fondait les deux en `None`. MSAL
+  relance l'erreur réseau d'un rafraîchissement.
+- Copilot SDK : `ASSISTANT_USAGE` porte `model`, `response_model`, `input_tokens`, `output_tokens`,
+  `reasoning_tokens`, `cache_read_tokens`, `time_to_first_token` et `reasoning_effort` ;
+  `SESSION_MODEL_CHANGE` porte `new_model` et `reasoning_effort`.
+- Le Wake Lock existait déjà (`frontend/app.js`), seulement quand l'onglet est visible.
+- La section « Voix entendues » est écrite par `empreintes.texte_bilan`, pas par
+  `memoire.noter_voix_du_jour`, qui ne fait que l'ajouter.
+
+Écarts au plan :
+- Partie 1 : la compaction de « Voix entendues » est faite dans `empreintes.texte_bilan`. La
+  vérification de l'index ne redit ses avertissements que s'ils changent (une écoute se consolide
+  plusieurs fois par séance). Le test de taille des consignes mesure `bibliothecaire.md`,
+  `CONSIGNE_CONDENSER` et la consigne d'écoute : environ 1 050 octets de plus, sous la limite de 1,2 Ko.
+- Partie 2 : la relecture a montré qu'un nombre d'échecs ne suffit pas. Un réveil et un
+  rafraîchissement à quelques secondes d'écart faisaient deux échecs. Le compte n'est donc dit
+  « déconnecté » que si les échecs durent depuis 4 min (`DUREE_AVANT_DECONNEXION`). Sans contexte
+  d'avant utilisable (démarrage, action de Joi, minuit), une coupure courte donne une phrase neutre,
+  ni gardée ni annoncée. Un échec de jeton récent vaut 5 s pour les autres fils, sans quoi les blocs
+  parallèles du réveil dépassaient 5 s. Une erreur réseau donne « Microsoft ne répond pas » (pas une
+  déconnexion). Le « une fois par jour » est tenu par un attribut de la veille, en mémoire (il repart
+  au redémarrage du serveur). La note de coupure passe par le contexte du réveil, ne dit que les heures
+  (les courriels sont rattrapés ensuite) et est oubliée le lendemain.
+- Partie 3 : les trous à dire vivent au niveau du module de `serveur.py`. Une écoute qui finit par
+  une déconnexion de la page est donc dite à la conversation qui suit la reconnexion. Le seuil de
+  5 min est `enregistreur.TROU_A_DIRE_S`. La note donne les heures en chiffres ; Joi les dit en lettres.
+- Partie 4 : la raison du retour en écoute vient de la page (`"raison"` dans le message `mode`) ou
+  du serveur (commandes vocales). L'usage est copié dans la mesure à la fin de chaque réponse ;
+  celui qui arrive hors d'un tour est ignoré. Le modèle facturé est gardé par segment
+  (`segment["modele"]`). Pas de test de `extraire.py` de bout en bout sur un faux journal : les
+  fonctions de lecture sont testées, pas la boucle de `main()`.
+
+Mesures (avant → après) :
+- Prompt système de Joi : `personnalite.md` inchangé. Le contexte du compte gagne une phrase
+  seulement quand il y a quelque chose à dire (déconnexion ou coupure, environ 200 octets).
+- Consignes de la bibliothécaire : +1 050 octets environ.
+
+Restent à l'utilisateur : les vérifications des parties 1 à 4 (« Ce que l'utilisateur devra vérifier
+lui-même »), en particulier `python -m joi.memoire condenser` Joi arrêtée, et le rattrapage à la main
+de ce que la condensation du 18 a perdu ; une écoute avec l'onglet caché 6 min ; un nom de modèle dans
+la ligne « Latence ».
+Reste à coder : la partie 5 (échéances), en session 2. Piste notée : un test de bout en bout de
+`extraire.py` sur un faux journal.
