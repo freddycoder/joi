@@ -32,6 +32,12 @@ AUTORITE = "https://login.microsoftonline.com/consumers"  # comptes Microsoft pe
 # offline_access est ajouté d'office par MSAL (le jeton de rafraîchissement).
 PORTEES = ["User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Calendars.Read.Shared",
            "Tasks.ReadWrite"]
+# Un refus net de Microsoft (connexion révoquée, consentement à redonner) : réessayer ne sert à rien.
+REFUS_NETS = ("invalid_grant", "interaction_required", "consent_required", "login_required")
+PAUSE_AVANT_REESSAI = 2  # secondes, avant le second essai d'un rafraîchissement de jeton raté
+# Un échec tout récent vaut pour les autres fils : les blocs du contexte du réveil partent ensemble, et
+# chacun aurait refait ses deux essais (8 s en tout, au-delà du délai du réveil) et ses avertissements.
+ECHEC_RETENU_S = 5
 CHAMPS_COURRIEL = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,inferenceClassification"
 CHAMPS_EVENEMENT = ("id,subject,start,end,isAllDay,location,bodyPreview,attendees,isReminderOn,"
                     "reminderMinutesBeforeStart,isCancelled")
@@ -186,6 +192,7 @@ class Microsoft:
         # et le cache MSAL sont sûrs entre fils, mais pas la création paresseuse de l'application ni deux
         # rafraîchissements du même jeton en même temps.
         self._verrou_jeton = threading.Lock()
+        self._dernier_echec: tuple[float, str] | None = None  # (time.monotonic(), raison)
 
     # --- Connexion ----------------------------------------------------------------------------
 
@@ -217,15 +224,41 @@ class Microsoft:
         return comptes[0] if comptes else None
 
     def _jeton(self, forcer: bool = False) -> str:
+        """Le jeton d'accès, rafraîchi au besoin. acquire_token_silent rendait None pour toute erreur, et
+        on écrivait « jeton expiré » : le 20 novembre, une coupure d'une minute a été prise pour une
+        déconnexion. On garde donc la vraie raison, et on réessaie une fois, sauf sur un refus net."""
         with self._verrou_jeton:
+            if self._dernier_echec and time.monotonic() - self._dernier_echec[0] < ECHEC_RETENU_S:
+                raise CompteDeconnecte(self._dernier_echec[1])
             compte = self._compte()
             if not compte:
                 raise CompteDeconnecte("aucune connexion enregistrée")
-            resultat = self._app().acquire_token_silent(PORTEES, account=compte, force_refresh=forcer)
-        if not resultat or "access_token" not in resultat:
-            raison = (resultat or {}).get("error") or "jeton expiré"
-            raise CompteDeconnecte(raison)
-        return resultat["access_token"]
+            for essai in range(2):
+                try:
+                    resultat = self._app().acquire_token_silent_with_error(PORTEES, account=compte,
+                                                                           force_refresh=forcer)
+                except Exception as e:
+                    # MSAL relance l'erreur réseau du rafraîchissement : une coupure, pas une
+                    # déconnexion. Un second essai, puis « Microsoft ne répond pas ».
+                    log.warning("Jeton du compte pas rafraîchi (essai %d) : %s", essai + 1, type(e).__name__)
+                    if essai == 0:
+                        time.sleep(PAUSE_AVANT_REESSAI)
+                        continue
+                    raise ErreurCompte("Microsoft ne répond pas (rafraîchissement du jeton)") from e
+                if resultat and "access_token" in resultat:
+                    self._dernier_echec = None
+                    return resultat["access_token"]
+                erreur = (resultat or {}).get("error") or "aucun jeton dans le cache"
+                detail = ((resultat or {}).get("error_description") or "").splitlines()
+                log.warning("Jeton du compte refusé (essai %d) : %s%s", essai + 1, erreur,
+                            f" ({detail[0][:200]})" if detail else "")
+                if erreur in REFUS_NETS or not resultat:
+                    break  # réessayer ne changera rien : il faut se reconnecter
+                if essai == 0:
+                    time.sleep(PAUSE_AVANT_REESSAI)
+            raison = erreur if erreur != "aucun jeton dans le cache" else "jeton expiré"
+            self._dernier_echec = (time.monotonic(), raison)
+        raise CompteDeconnecte(raison)
 
     def connecter(self, afficher: Callable[[str], None] = print, par_code: bool = False) -> str:
         """Par défaut, la page de connexion Microsoft s'ouvre dans le navigateur (redirection vers

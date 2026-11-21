@@ -273,8 +273,11 @@ que la session Copilot de Joi lance elle-même. La bibliothécaire n'y a pas acc
 ```
 
 Les panneaux `Alt+P` et `Alt+M` ont un groupe « Compte » (connexion, dernière vérification, dernière
-erreur). Si le jeton expire (90 jours sans usage, mot de passe changé), Joi le dit, et il suffit de
-relancer `connecter`. Le journal du serveur MCP est dans `donnees/logs/compte.log`.
+erreur). Si le jeton expire (90 jours sans usage, mot de passe changé), Joi le dit d'elle-même à sa
+première réplique, une fois par jour, et il suffit de relancer `connecter`. Une coupure de quelques
+minutes est tue (l'ancien contexte reste servi) ; quand le compte revient, Joi donne l'heure de la
+coupure. Le journal donne la vraie raison du refus de Microsoft ; celui du serveur MCP est dans
+`donnees/logs/compte.log`.
 
 **Vie privée.** Les courriels de Joi passent par Copilot, comme le reste de vos conversations. La
 mémoire suit la même règle qu'en écoute : ce qui te concerne, pas de dossier sur les expéditeurs.
