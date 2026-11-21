@@ -375,3 +375,45 @@ de ce que la condensation du 18 a perdu ; une écoute avec l'onglet caché 6 min
 la ligne « Latence ».
 Reste à coder : la partie 5 (échéances), en session 2. Piste notée : un test de bout en bout de
 `extraire.py` sur un faux journal.
+
+---
+
+## État au 2026-11-21 (fin de la session 2)
+
+La partie 5 est codée sur `joi-fiable` (commit 5f82045) : le plan est complet, avec 301 tests (285 au
+début de la session). Relue par `joi-reviseur` ; ses constats « à corriger » sont corrigés.
+
+Vérifié pendant la session :
+- Un réveil est un `Cerveau.demarrer()` par connexion de la page : le prompt (mémoire, échéances) est
+  construit à chaque conversation, et `python -m joi.banc` passe par le même chemin.
+- L'outil `creer_evenement` n'invite que la personne (`inviter_toi`) ; un paramètre inconnu est ignoré
+  par le serveur MCP.
+- `engagements.est_oui` refuse « mets-le à l'agenda » et « ajoute-le » (« ajoute » y marque un
+  changement).
+
+Écarts au plan :
+- L'état « déjà dite » a pour clé le jour et l'heure de l'échéance, pas le texte de la ligne : la
+  bibliothécaire réécrit ses fichiers à chaque passe. Il n'est noté qu'une fois la session Copilot
+  créée (`memoire.noter_echeances_dites`), jamais par le banc d'essai.
+- Joi demande « je le note dans mon agenda ? » (et non « à ton agenda ») : sans invitation, rien ne se
+  rappelle sur le téléphone de la personne, et la question ne doit pas le laisser croire.
+- Un oui d'agenda accepte aussi « mets-le », « ajoute-le », « note-le » sans négation
+  (`integration.est_oui_agenda`).
+- Le refus d'un invité tiers est vérifié dans la permission et dans l'outil, mais l'outil n'a
+  aujourd'hui aucun moyen d'inviter un tiers : c'est un garde-fou pour plus tard.
+- Les tests prévus dans `tests/test_reveil_compte.py` sont tous dans `tests/test_echeances.py`.
+- Pour tenir les consignes de la bibliothécaire sous 1,2 Ko, des redites de `bibliothecaire.md` ont été
+  resserrées (pas de fichier sur les voix, voix inconnues, journée sans rien d'important).
+
+Mesures (avant → après) :
+- Consignes de la bibliothécaire : +1 200 octets sur tout le plan (le test mesure `bibliothecaire.md`,
+  `CONSIGNE_CONDENSER` et la consigne d'écoute ; la phrase des trous, ajoutée seulement s'il y en a un,
+  n'y est pas comptée : +138).
+- Prompt système de Joi : environ +520 octets hors contenu des échéances (ligne du compte, en-tête
+  « À venir », balises, consigne du jour), seulement quand il y a des échéances.
+
+Restent à l'utilisateur : les vérifications de « Ce que l'utilisateur devra vérifier lui-même », dont
+la partie 5 : la veille d'un rendez-vous dit pendant l'écoute, Joi en parle-t-elle au réveil, une
+seule fois ? Propose-t-elle de le noter, et l'événement créé n'a-t-il aucun invité ?
+Reste à coder : rien dans ce plan. Pistes : un test de bout en bout de `extraire.py` ; le bogue des
+propositions « montrées » sans avoir été dites, en premier au prochain plan sur la pro-activité.
