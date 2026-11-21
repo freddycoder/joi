@@ -116,9 +116,12 @@ class Cerveau:
     """modele : le modèle Copilot (JOI_MODELE par défaut ; le banc d'essai en essaie d'autres).
     avec_compte : brancher le compte de Joi s'il est réglé (le banc d'essai s'en passe)."""
 
-    def __init__(self, modele: str | None = config.JOI_MODELE, avec_compte: bool = True):
+    def __init__(self, modele: str | None = config.JOI_MODELE, avec_compte: bool = True,
+                 noter_echeances: bool = True):
         self.modele = modele
         self._avec_compte = avec_compte
+        self._noter_echeances = noter_echeances  # faux pour le banc d'essai (voir memoire._a_venir)
+        self.usage: dict = {}  # le dernier tour : modèle réel, jetons (voir _noter_usage)
         # La dernière réponse, pour la mesure de la latence (time.monotonic) : l'envoi du message,
         # et l'arrivée du premier morceau de texte.
         self.envoi: float | None = None
@@ -180,6 +183,9 @@ class Cerveau:
             self._client = await client_partage(neuf=True)
             self._session = await nouvelle_session(self._client)
         self._session.on(self._sur_evenement)
+        if self._noter_echeances:
+            # La consigne « parle d'une échéance » est maintenant dans une vraie session : une fois par jour.
+            memoire.noter_echeances_dites()
 
     async def arreter(self) -> None:
         """Ferme la session ; le client partagé reste ouvert pour la conversation suivante."""
@@ -194,6 +200,17 @@ class Cerveau:
         genre = evenement.type
         if genre == SessionEventType.SESSION_IDLE:
             self._inactif.set()
+        elif genre == SessionEventType.ASSISTANT_USAGE:
+            # Hors d'un tour (appel annulé par une interruption, arrivé après coup) : il fausserait le
+            # tour suivant.
+            if self._file is not None:
+                self._noter_usage(evenement.data)
+        elif genre == SessionEventType.SESSION_MODEL_CHANGE:
+            # Copilot change de modèle en cours de session (choix automatique) : au journal, pour lire
+            # la ligne « Latence » qui suit.
+            log.info("Modèle de la session : %s%s", getattr(evenement.data, "new_model", "?"),
+                     f" (effort {evenement.data.reasoning_effort})"
+                     if getattr(evenement.data, "reasoning_effort", None) else "")
         file = self._file
         if file is None:
             return
@@ -223,6 +240,26 @@ class Cerveau:
         elif genre == SessionEventType.SESSION_ERROR:
             file.put_nowait(RuntimeError(evenement.data.message))
 
+    def _noter_usage(self, data) -> None:
+        """Un appel au modèle vient de finir (ASSISTANT_USAGE) : le modèle qui a vraiment répondu et ses
+        jetons, pour la ligne « Latence ». « modèle défaut » ne disait pas lequel, et la latence de 15 s
+        du 20 novembre ne pouvait pas s'expliquer. Un tour avec outils fait plusieurs appels : les
+        jetons s'additionnent, le délai du premier jeton est celui du premier appel."""
+        u = self.usage
+        u["modele"] = getattr(data, "response_model", None) or getattr(data, "model", None) or u.get("modele")
+        u["appels"] = u.get("appels", 0) + 1
+        for cle, champ in (("entree", "input_tokens"), ("sortie", "output_tokens"),
+                           ("reflexion", "reasoning_tokens"), ("cache", "cache_read_tokens")):
+            valeur = getattr(data, champ, None)
+            if valeur is not None:
+                u[cle] = u.get(cle, 0) + valeur
+        premier = getattr(data, "time_to_first_token", None)
+        if premier is not None and "premier_jeton_s" not in u:
+            u["premier_jeton_s"] = round(premier.total_seconds(), 2)
+        effort = getattr(data, "reasoning_effort", None)
+        if effort:
+            u["effort"] = str(effort)
+
     async def repondre(self, texte: str, systeme: bool = False, note: str | None = None,
                        images: list[dict] | None = None) -> AsyncIterator[str]:
         """Envoie ce que la personne a dit et produit la réponse de Joi, phrase par phrase.
@@ -237,6 +274,7 @@ class Cerveau:
         message pour que le modèle les voie."""
         self._file = asyncio.Queue()
         self._inactif.clear()
+        self.usage = {}  # rempli par ASSISTANT_USAGE pendant ce tour
         self.envoi, self.premier_token = time.monotonic(), None
         self._message, self._messages = None, 0
         if systeme:

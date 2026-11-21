@@ -136,6 +136,30 @@ def voix_du_jour(donnees: Path, jour: date) -> str:
     return str(len(voix)) if voix else "—"
 
 
+# Plan Joi fiable, partie 4 : le modèle qui a vraiment répondu, ses jetons, et les « Joi, reviens »
+# repassés en écoute sans un mot.
+RE_MODELE = re.compile(r"Latence : .* · modèle (.+?)(?: · |$)")
+RE_JETONS = re.compile(r" · jetons entrée (\d+), sortie (\d+)(?:, réflexion (\d+))?")
+RE_REVEIL_SANS_SUITE = re.compile(r"Retour en écoute \(.*\) : conversation ouverte par « Joi, reviens », 0 tour")
+
+
+def modeles_du_jour(lignes: list[str]) -> str:
+    """« défaut (gpt-x) ×20, autre ×2 » : les modèles des lignes « Latence » d'un jour."""
+    compte = Counter(m.group(1).strip() for ligne in lignes if (m := RE_MODELE.search(ligne)))
+    return ", ".join(f"{nom} ×{n}" for nom, n in compte.most_common()) or "—"
+
+
+def jetons_du_jour(lignes: list[str]) -> str:
+    """Les jetons médians par réponse : entrée / sortie / réflexion."""
+    trouves = [m for ligne in lignes if (m := RE_JETONS.search(ligne))]
+    if not trouves:
+        return "—"
+    entree = statistics.median(int(m.group(1)) for m in trouves)
+    sortie = statistics.median(int(m.group(2)) for m in trouves)
+    reflexion = statistics.median(int(m.group(3) or 0) for m in trouves)
+    return f"{entree:.0f} / {sortie:.0f} / {reflexion:.0f}"
+
+
 RE_COUT_JOUR = re.compile(r"Coût de transcription du (\d{4}-\d{2}-\d{2}) : ([\d.]+) \$ US")
 RE_COUT_LOT = re.compile(r"Écoute transcrite : .*environ ([\d.]+) \$ US")
 
@@ -239,6 +263,7 @@ def main() -> int:
     logs_md, avertissements = [], []
     latences, premiers_mots, reponses = defaultdict(list), defaultdict(list), defaultdict(list)
     recherches, reveils = defaultdict(int), defaultdict(list)
+    lignes_latence, reveils_sans_suite = defaultdict(list), defaultdict(int)
     lignes_cout: list[str] = []
     chemin_log = donnees / "logs" / "joi.log"
     if chemin_log.exists():
@@ -264,6 +289,10 @@ def main() -> int:
                     avertissements.append(ligne)
                 if m := RE_LATENCE.search(ligne):
                     latences[jour_ligne].append(float(m.group(1)))
+                if "Latence : " in ligne:
+                    lignes_latence[jour_ligne].append(ligne)
+                if RE_REVEIL_SANS_SUITE.search(ligne):
+                    reveils_sans_suite[jour_ligne] += 1
                 if m := RE_PREMIER_MOT.search(ligne):
                     premiers_mots[jour_ligne].append(float(m.group(1)))
                 if m := RE_REPONSE.search(ligne):
@@ -284,6 +313,9 @@ def main() -> int:
         r = reveils.get(jour, [])
         s["réveils (s)"] = ", ".join(fmt(x) for x in r) or "—"
         s["transcription ($ US)"] = f"{couts[jour]:.2f}".replace(".", ",") if jour in couts else "—"
+        s["modèle (réponses)"] = modeles_du_jour(lignes_latence.get(jour, []))
+        s["jetons médians (entrée / sortie / réflexion)"] = jetons_du_jour(lignes_latence.get(jour, []))
+        s["réveils vocaux sans suite"] = reveils_sans_suite.get(jour, 0)
 
     # Mémoire : la taille et la date de chaque fichier, pour repérer ce qui grossit ou ne bouge plus.
     memoire = donnees / "memoire"

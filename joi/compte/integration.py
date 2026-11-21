@@ -12,6 +12,7 @@ passent par le gestionnaire (vérifié avec le Copilot SDK 1.0.31).
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Callable
@@ -19,13 +20,37 @@ from typing import Callable
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from .. import config
-from . import OUTILS, OUTILS_ECRITURE, SERVEUR, brouillons, engagements, reglages, veille
+from . import OUTILS, OUTILS_ECRITURE, SERVEUR, brouillons, engagements, est_echeance, reglages, veille
 
 log = logging.getLogger("joi.compte")
 
 FICHIER_CONSIGNES = Path(__file__).resolve().parent / "personnalite.md"
 DELAI_OUTIL_MS = 30_000
-AGE_MAX_OUI = 180  # secondes : le oui à une proposition d'engagement doit être tout récent
+AGE_MAX_OUI = 180  # secondes : le oui à une proposition (engagement, échéance) doit être tout récent
+
+
+# « Mets-le à l'agenda », « ajoute-le » : un oui à « je le note dans mon agenda ? » que est_oui (réglé
+# pour les tâches, où « ajoute » marque un changement) refuserait.
+OUI_AGENDA = re.compile(r"\b(mets|ajoute|inscris|note)[- ](le|la)\b")
+NON_AGENDA = re.compile(r"\b(non|pas|jamais|attends?|annule|plutot|change|modifie)\b|n'")
+
+
+def est_oui_agenda(texte: str) -> bool:
+    """La personne accepte-t-elle qu'on mette l'échéance à l'agenda ? Un oui, ou « mets-le » sans négation."""
+    if engagements.est_oui(texte):
+        return True
+    normal = engagements._sans_accents(engagements._normal(texte))
+    return bool(OUI_AGENDA.search(normal)) and not NON_AGENDA.search(normal)
+
+
+def _arguments(brut):
+    """Les arguments d'un appel d'outil : un dict, ou du JSON à lire. None s'ils sont illisibles."""
+    if isinstance(brut, str):
+        try:
+            return json.loads(brut)
+        except json.JSONDecodeError:
+            return None
+    return brut
 
 
 def outil_du_compte(nom: str | None) -> str | None:
@@ -71,15 +96,40 @@ class Integration:
     def noter_tour(self, texte: str) -> None:
         self.confirmation.noter_tour(texte)
 
+    def _verifier_evenement(self, brut) -> str | None:
+        """None si creer_evenement peut passer, sinon la raison du refus (plan Joi fiable, partie 5).
+        Jamais d'invité autre que la personne. Un événement né d'une échéance de la mémoire (ce qui a été
+        entendu) exige en plus un oui de la personne, à l'instant, et aucun invité du tout."""
+        arguments = _arguments(brut)
+        if not isinstance(arguments, dict):
+            log.warning("creer_evenement refusé : arguments illisibles.")
+            return "Arguments invalides."
+        # L'outil n'invite que la personne (inviter_toi) ; ce garde-fou tient même si une liste d'invités
+        # apparaît un jour dans ses paramètres, ou si le modèle en invente une.
+        invites = arguments.get("invites") or []
+        if isinstance(invites, str):
+            invites = [invites]
+        tiers = [a for a in invites if not isinstance(a, str) or a.strip().lower() != reglages.PROPRIETAIRE]
+        if tiers or (invites and not reglages.PROPRIETAIRE):
+            log.info("creer_evenement refusé : invité autre que la personne.")
+            return "Tu ne peux inviter personne d'autre que la personne elle-même."
+        if not est_echeance(arguments.get("source")):
+            return None
+        if invites or arguments.get("inviter_toi") is True:
+            log.info("Événement d'échéance refusé : avec invitation.")
+            return "Un événement tiré de « À venir » se crée sans invitation : remets inviter_toi à faux."
+        tour = self.confirmation.dernier_tour(AGE_MAX_OUI)
+        if not tour or not est_oui_agenda(tour):
+            log.info("Événement d'échéance refusé : pas de oui clair.")
+            return ("La personne n'a pas dit oui clairement : l'événement n'est pas créé. Dis-lui que tu ne "
+                    "l'as pas noté, et redemande simplement « je le note dans mon agenda ? ».")
+        log.info("Événement d'échéance confirmé par la personne.")
+        return None
+
     def _verifier_proposition(self, brut) -> str | None:
         """None si la réponse à un engagement proposé peut passer, sinon la raison du refus. Tout ce qui
         n'est pas clairement conforme est refusé (arguments illisibles, réponse inconnue)."""
-        arguments = brut
-        if isinstance(brut, str):
-            try:
-                arguments = json.loads(brut)
-            except json.JSONDecodeError:
-                arguments = None
+        arguments = _arguments(brut)
         if not isinstance(arguments, dict) or arguments.get("reponse") not in ("oui", "non") \
                 or not isinstance(arguments.get("numero"), str):
             log.warning("marquer_proposition refusé : arguments illisibles.")
@@ -115,6 +165,10 @@ class Integration:
             log.info("Envoi du brouillon %s confirmé par la personne.", arguments.get("brouillon"))
         if outil == "marquer_proposition":
             raison = self._verifier_proposition(requete.args)
+            if raison:
+                return PermissionDecisionReject(feedback=raison)
+        if outil == "creer_evenement":
+            raison = self._verifier_evenement(requete.args)
             if raison:
                 return PermissionDecisionReject(feedback=raison)
         if outil in OUTILS_ECRITURE:

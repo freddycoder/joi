@@ -21,7 +21,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import SERVEUR, brouillons, engagements, journal_compte, reglages
+from . import SERVEUR, brouillons, engagements, est_echeance, journal_compte, reglages
 from .fournisseur import ErreurCompte, Fournisseur, choisir
 from .modele import (date_complete, externe, ligne_courriel, ligne_evenement, ligne_tache, lire_instant,
                      maintenant, numero_court, quand)
@@ -226,6 +226,8 @@ def creer_serveur(fournisseur: Fournisseur | None = None) -> MCPServer:
         rappel_minutes: Annotated[int, Field(description="Rappel, en minutes avant le début.", ge=0)] = 15,
         inviter_toi: Annotated[bool, Field(description="Inviter la personne : son agenda le lui rappellera "
                                                        "une fois l'invitation acceptée.")] = True,
+        source: Annotated[str, Field(description="« echeance » si tu le crées sur un oui à ta proposition "
+                                                 "tirée de « À venir » ; vide sinon.")] = "",
     ) -> str:
         """Crée un événement dans TON agenda (Joi). Pour un rappel, garde inviter_toi : la personne
         reçoit une invitation, et son téléphone le lui rappelle quand elle l'a acceptée."""
@@ -234,6 +236,11 @@ def creer_serveur(fournisseur: Fournisseur | None = None) -> MCPServer:
         if t1 <= t0:
             raise ErreurCompte("La fin doit être après le début.")
         invites, remarque = [], ""
+        # Né d'une échéance de la mémoire (donc de ce qui a été entendu) : jamais d'invitation, même si le
+        # modèle la demande (décision de l'utilisateur). La permission l'a déjà refusé ; ceci tient si elle
+        # change un jour.
+        if est_echeance(source):
+            inviter_toi = False
         if inviter_toi:
             if reglages.PROPRIETAIRE:
                 invites = [reglages.PROPRIETAIRE]
@@ -241,6 +248,8 @@ def creer_serveur(fournisseur: Fournisseur | None = None) -> MCPServer:
                 remarque = " Aucune invitation envoyée : JOI_COURRIEL_PROPRIETAIRE est vide dans .env."
         if invites:
             brouillons.verifier_adresses(invites)
+            if any(a != reglages.PROPRIETAIRE for a in invites):
+                raise ErreurCompte("Seule la personne peut être invitée.")
         e = compte.creer_evenement(titre.strip(), t0, t1, lieu.strip(), note.strip(), rappel_minutes, invites)
         journal_compte.evenement("cree", e)
         numero = registre.numero("e", e.id, "joi")

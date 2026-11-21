@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -23,7 +24,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -44,6 +45,24 @@ TAILLE_MAX_SOUVENIR = 3000  # caractères renvoyés par se_souvenir (fichiers tr
 TAILLE_MAX_JOURNEE = 16000  # en plus : le résumé des journées nommées (« aujourd'hui », « 16 novembre »)
 TAILLE_MAX_TRANCHE = 20000  # caractères de journal envoyés par message à la bibliothécaire
 DELAI_CONSOLIDATION = 600  # secondes accordées à une tranche de consolidation
+
+# Les échéances (plan Joi fiable, partie 5) : la bibliothécaire tient echeances.md, une ligne par date
+# qui engage la personne. Le code n'en croit que les lignes bien formées : la mémoire est écrite par un
+# modèle à partir de ce qui a été entendu, une ligne ratée ne doit ni casser le réveil ni s'y glisser.
+FICHIER_ECHEANCES = "echeances.md"
+ECHEANCES_JOURS = 7  # d'aujourd'hui à dans 7 jours
+ECHEANCES_MAX = 5  # les plus proches d'abord
+ECHEANCE_TEXTE_MAX = 200  # caractères du « quoi » d'une ligne
+# Hors de la mémoire (qui a son propre git, réécrit par la bibliothécaire) : date → échéances (jour et
+# heure) déjà données avec la consigne d'en parler, pour ne la donner qu'une fois par jour.
+FICHIER_ECHEANCES_DITES = config.DOSSIER_DONNEES / "echeances-dites.json"
+# Ce que le dernier contexte_reveil a donné, à noter par noter_echeances_dites() une fois la session
+# créée : un réveil raté ou le banc d'essai ne doivent pas épuiser la consigne du jour.
+_echeances_a_noter: tuple[date, set[str]] | None = None
+_LIGNE_ECHEANCE = re.compile(
+    r"-\s*(\d{4}-\d\d-\d\d)(?:\s+(\d\d):(\d\d))?\s*:\s*(.+?)\s*\(journees/\d{4}-\d\d-\d\d\.md\)\s*")
+CONSIGNE_ECHEANCE = ("Au début de la conversation, mentionne au plus une chose d'aujourd'hui ou de demain, "
+                     "en une phrase, une fois.")
 
 INDEX_DEPART = """---
 description: Carte de la mémoire de Joi, une ligne par fichier.
@@ -176,8 +195,9 @@ def _fichiers_md() -> list[Path]:
     )
 
 
-def contexte_reveil() -> str:
-    """Ce que Joi sait déjà, à ajouter à son prompt système."""
+def contexte_reveil(aujourdhui: date | None = None) -> str:
+    """Ce que Joi sait déjà, à ajouter à son prompt système : toi.md, l'index, et les échéances des
+    prochains jours."""
     morceaux = []
     for nom in ("toi.md", "index.md"):
         fichier = RACINE / nom
@@ -191,7 +211,120 @@ def contexte_reveil() -> str:
                 contenu = _couper(contenu, TAILLE_MAX_REVEIL_FICHIER)
             morceaux.append(f"### {nom}\n{contenu}")
     texte = "\n\n".join(morceaux)
-    return f"\n\n## Ce que tu sais déjà (ta mémoire)\n{texte}\n" if texte else ""
+    texte = f"\n\n## Ce que tu sais déjà (ta mémoire)\n{texte}\n" if texte else ""
+    return texte + _a_venir(aujourdhui or date.today())
+
+
+@dataclass
+class Echeance:
+    jour: date
+    heure: str  # « HH:MM », ou vide
+    quoi: str
+    ligne: str  # la ligne du fichier, telle quelle
+
+    @property
+    def cle(self) -> str:
+        """La clé de « déjà dite » : le jour et l'heure, pas le texte, que la bibliothécaire reformule
+        à chaque passe (sans quoi la consigne reviendrait au réveil suivant)."""
+        return f"{self.jour.isoformat()} {self.heure}".strip()
+
+
+def echeances_a_venir(aujourdhui: date) -> list[Echeance]:
+    """Les lignes bien formées de echeances.md datées d'aujourd'hui à dans ECHEANCES_JOURS jours, les
+    plus proches d'abord, ECHEANCES_MAX au plus. Les lignes mal formées ou passées sont comptées au
+    journal (pour voir si la bibliothécaire tient le format), jamais servies."""
+    fichier = RACINE / FICHIER_ECHEANCES
+    try:
+        lignes = fichier.read_text(encoding="utf-8").splitlines() if fichier.exists() else []
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning("Échéances illisibles (%s) : ignorées.", e)
+        return []
+    gardees: list[Echeance] = []
+    mal_formees = passees = trop_loin = 0
+    for brute in lignes:
+        ligne = brute.strip()
+        if not ligne.startswith("-") or ligne.startswith("---"):
+            continue  # en-tête, titre, ligne vide
+        m = _LIGNE_ECHEANCE.fullmatch(ligne)
+        try:
+            jour = date.fromisoformat(m[1]) if m else None
+            if m and m[2] and not (int(m[2]) < 24 and int(m[3]) < 60):
+                jour = None
+        except ValueError:
+            jour = None
+        if jour is None:
+            mal_formees += 1
+        elif jour < aujourdhui:
+            passees += 1
+        elif (jour - aujourdhui).days > ECHEANCES_JOURS:
+            trop_loin += 1
+        else:
+            # Sans crochets : une phrase entendue ne doit pas pouvoir refermer la balise de externe()
+            # (« [fin du contenu externe] ») et se faire passer pour une consigne.
+            quoi = re.sub(r"[\[\]]", "", m[4])[:ECHEANCE_TEXTE_MAX].strip()
+            gardees.append(Echeance(jour, f"{m[2]}:{m[3]}" if m[2] else "", quoi, ligne))
+    if mal_formees or passees:
+        log.info("Échéances : %d gardée(s), %d mal formée(s), %d passée(s), %d au-delà de %d jours.",
+                 len(gardees), mal_formees, passees, trop_loin, ECHEANCES_JOURS)
+    gardees.sort(key=lambda e: (e.jour, e.heure or "99:99"))
+    return gardees[:ECHEANCES_MAX]
+
+
+def _jour_dit(jour: date, aujourdhui: date) -> str:
+    from .compte.modele import _date_ecrite
+
+    ecrit = _date_ecrite(jour, annee=jour.year != aujourdhui.year)
+    return {0: "aujourd'hui", 1: f"demain, {ecrit}"}.get((jour - aujourdhui).days, ecrit)
+
+
+def _deja_dites(aujourdhui: date) -> set[str]:
+    try:
+        etat = json.loads(FICHIER_ECHEANCES_DITES.read_text(encoding="utf-8"))
+        return set(etat.get(aujourdhui.isoformat(), [])) if isinstance(etat, dict) else set()
+    except (OSError, ValueError, TypeError):
+        return set()  # absent ou illisible : au pire, la consigne revient une fois de plus
+
+
+def noter_echeances_dites() -> None:
+    """Note comme données les échéances que le dernier contexte_reveil a confiées avec la consigne.
+    Appelée par le cerveau une fois la session créée, jamais par le banc d'essai."""
+    global _echeances_a_noter
+    if _echeances_a_noter is None:
+        return
+    aujourdhui, cles = _echeances_a_noter
+    _echeances_a_noter = None
+    _noter_dites(aujourdhui, _deja_dites(aujourdhui) | cles)
+
+
+def _noter_dites(aujourdhui: date, lignes: set[str]) -> None:
+    # Seulement aujourd'hui : l'état d'hier ne sert plus à rien.
+    try:
+        FICHIER_ECHEANCES_DITES.parent.mkdir(parents=True, exist_ok=True)
+        FICHIER_ECHEANCES_DITES.write_text(
+            json.dumps({aujourdhui.isoformat(): sorted(lignes)}, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError as e:
+        log.warning("Échéances déjà dites : état pas écrit (%s).", e)
+
+
+def _a_venir(aujourdhui: date) -> str:
+    """La section « À venir » du réveil. Les lignes viennent de la mémoire, donc de ce qui a été entendu :
+    elles passent par externe() (une donnée, jamais une consigne). La consigne d'en parler n'est donnée
+    qu'au premier réveil du jour qui a une échéance d'aujourd'hui ou de demain pas encore donnée."""
+    global _echeances_a_noter
+    _echeances_a_noter = None
+    echeances = echeances_a_venir(aujourdhui)
+    if not echeances:
+        return ""
+    from .compte.modele import externe
+
+    lignes = "\n".join(f"- {_jour_dit(e.jour, aujourdhui)}{', ' + e.heure if e.heure else ''} : {e.quoi}"
+                       for e in echeances)
+    texte = f"\n## À venir (les {ECHEANCES_JOURS} prochains jours, d'après ta mémoire)\n{externe(lignes)}\n"
+    proches = {e.cle for e in echeances if (e.jour - aujourdhui).days <= 1}
+    if proches - _deja_dites(aujourdhui):
+        _echeances_a_noter = (aujourdhui, proches)
+        texte += CONSIGNE_ECHEANCE + "\n"
+    return texte
 
 
 # --- Outil de la conversation -----------------------------------------------------------------
@@ -648,6 +781,7 @@ async def consolider() -> None:
             await asyncio.to_thread(
                 _enregistrer_version, f"Consolidation jusqu'à {journal.derniere_consolidation()}"
             )
+            await asyncio.to_thread(verifier_index)
 
 
 # --- Consolidation d'une écoute ---------------------------------------------------------------
@@ -677,6 +811,9 @@ class Ecoute:
     # Une écoute déjà transmise (avec les étiquettes A/B), transmise à nouveau avec les voix
     # reconnues : la bibliothécaire corrige ce qu'elle en avait tiré au lieu de l'ajouter.
     correction: bool = False
+    # Les plages sans audio (micro ou onglet coupé), « HH:MM » : la journée doit le dire, sinon un trou
+    # de 95 min passe pour un moment calme.
+    trous: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _tranches_ecoute(ecoute: Ecoute) -> list[tuple[str, list[Callable[[], None]]]]:
@@ -770,6 +907,11 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                                   "déjà dans le résumé de la journée, ne le répète pas.")
                     if ecoute.en_cours:
                         suite += " L'écoute continue : la suite te sera transmise plus tard."
+                    if ecoute.trous:
+                        plages = ", ".join(f"de {d} à {f}" for d, f in ecoute.trous)
+                        suite += (f" Rien n'a été enregistré {plages} (micro ou onglet coupé) : dis-le en une "
+                                  "ligne dans le résumé de la journée"
+                                  + (", si ce n'est pas déjà noté." if ecoute.deja_en_partie else "."))
                     if ecoute.voix_reconnues:
                         suite += (" Les voix ont été reconnues à leur empreinte vocale (voir « Voix reconnues » "
                                   "dans tes consignes).")
@@ -793,7 +935,8 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                             consigne = (f"Le résumé de cette journée va dans journees/{jour}.md "
                                         "(lis-le d'abord s'il existe, puis complète-le). Si un fait "
                                         "change l'état d'un projet (décision, date, achat, problème "
-                                        "réglé), mets aussi à jour sa ligne dans le fichier du projet ; "
+                                        "réglé), remplace aussi l'état dans sa ligne du fichier du projet, "
+                                        "sans y recopier le récit ; "
                                         "si un fait durable concerne la personne, mets à jour toi.md. ")
                         message = (
                             f"{_etat_memoire()}\n\n"
@@ -815,6 +958,7 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
         finally:
             debuts = ", ".join(e.debut[:16].replace("T", " ") for e in ecoutes)
             await asyncio.to_thread(_enregistrer_version, f"Écoute du {debuts}")
+            await asyncio.to_thread(verifier_index)
     if apprises:
         _signaler_apprises(apprises)
         _signaler_ecoutes([e for e in ecoutes if e.debut[:10] in apprises])
@@ -831,10 +975,14 @@ CONSIGNE_CONDENSER = (
     "réécris-le plus court : garde ce qui servira dans un mois (décisions, dates, engagements, "
     "personnes, problèmes réglés et leur solution), retire le dépannage ponctuel, les numéros de "
     "version et les commandes, fusionne ce qui se répète. Ne perds aucun fait durable : s'il a sa "
-    "place ailleurs (le fichier d'un projet, toi.md), mets-le là. N'invente rien. Garde tels quels "
+    "place ailleurs (le fichier d'un projet, toi.md), mets-le là. Ne supprime jamais une décision, une "
+    "échéance à venir, un suivi pas clos, un risque de sécurité pas réglé ni un chiffre de décision "
+    "(parts, dates, montants) : mets-le d'abord dans le projet concerné. N'invente rien. Garde tels quels "
     "l'en-tête et la section « Voix entendues » d'une journée. Corrige ce qui fait de la personne une "
     "tierce personne sous son propre nom. Mets index.md à jour si tu crées, déplaces ou supprimes un "
-    "fichier."
+    "fichier. Au lieu de « Terminé », réponds par la liste des faits déplacés ou retirés, un par "
+    "ligne commençant par « - » (« - déplacé vers projets/x.md : … », « - retiré : … »), ou « Rien "
+    "de déplacé »."
 )
 
 
@@ -886,15 +1034,16 @@ async def condenser() -> Condensation:
                       "de la mémoire (git absent, ou dépôt verrouillé : Joi tourne-t-elle ?).")
             return Condensation(None, [], [])
         fichiers = _a_condenser()
-        confies, echecs = [], []
+        confies, echecs, deplaces = [], [], []
         try:
             async with _bibliothecaire() as session:
                 for chemin in fichiers:
                     log.info("Condensation de %s…", chemin)
                     message = f"{_etat_memoire()}\n\nCONDENSER : {chemin}\n{CONSIGNE_CONDENSER}"
                     try:
-                        await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
+                        reponse = await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
                         confies.append(chemin)
+                        deplaces += [f"{chemin} : {fait}" for fait in _faits_deplaces(reponse)]
                     except Exception:
                         log.exception("Condensation de %s interrompue", chemin)
                         echecs.append(chemin)
@@ -905,8 +1054,64 @@ async def condenser() -> Condensation:
             resume = f"{len(confies)} fichier(s) sur {len(fichiers)}"
             if echecs:
                 resume += f", échec : {', '.join(echecs)}"
-            await asyncio.to_thread(_enregistrer_version, f"Après la condensation ({resume})")
+            message = f"Après la condensation ({resume})"
+            if deplaces:
+                # La personne relit le diff : cette liste lui dit où chercher ce qui a bougé ou disparu.
+                message += "\n\nFaits déplacés ou retirés :\n" + "\n".join(f"- {f}" for f in deplaces)
+            await asyncio.to_thread(_enregistrer_version, message)
     return Condensation(avant, confies, echecs)
+
+
+INDEX_LIGNE_MAX = 150  # caractères : la règle de bibliothecaire.md pour une ligne de l'index
+INDEX_JOURNEE_JOURS = 7  # au-delà, une journée se regroupe par semaine dans l'index
+_index_deja_signale: set[str] = set()
+
+
+def verifier_index(aujourdhui: date | None = None) -> list[str]:
+    """Ce qui, dans index.md, ne suit pas les consignes (ligne trop longue, journée de plus d'une
+    semaine pas regroupée). Le code ne corrige rien et ne rappelle pas le modèle : il le dit au
+    journal, et la prochaine révision des données le verra."""
+    fichier = RACINE / "index.md"
+    if not fichier.exists():
+        return []
+    aujourdhui = aujourdhui or date.today()
+    try:
+        contenu = fichier.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:  # une vérification ne casse jamais la consolidation
+        log.warning("Index de la mémoire illisible : %s", e)
+        return []
+    problemes = []
+    for ligne in contenu.splitlines():
+        ligne = ligne.strip()
+        if not ligne.startswith("-"):
+            continue
+        if len(ligne) > INDEX_LIGNE_MAX:
+            problemes.append(f"ligne de {len(ligne)} caractères : {ligne[:60]}…")
+        # Une ligne pour une seule journée (« - journees/AAAA-MM-JJ.md : … ») ; une semaine regroupée,
+        # elle, ne commence pas ainsi.
+        m = re.match(r"-\s*journees/(\d{4}-\d\d-\d\d)\.md\s*:", ligne)
+        if m:
+            try:
+                jour = date.fromisoformat(m.group(1))
+            except ValueError:
+                continue
+            if (aujourdhui - jour).days > INDEX_JOURNEE_JOURS:
+                problemes.append(f"journée du {m.group(1)} pas regroupée par semaine")
+    # Une écoute se consolide plusieurs fois par séance : on ne redit que ce qui a changé.
+    global _index_deja_signale
+    if set(problemes) != _index_deja_signale:
+        for probleme in problemes:
+            log.warning("Index de la mémoire : %s", probleme)
+        _index_deja_signale = set(problemes)
+    return problemes
+
+
+def _faits_deplaces(reponse) -> list[str]:
+    """Les lignes « - … » de la réponse de la bibliothécaire (l'événement final de send_and_wait) :
+    les faits qu'elle dit avoir déplacés ou retirés. Rien si elle n'a rien listé."""
+    texte = getattr(getattr(reponse, "data", None), "content", None) or ""
+    faits = [ligne.strip()[1:].strip() for ligne in texte.splitlines() if ligne.strip().startswith("-")]
+    return [f[:300] for f in faits if f][:40]
 
 
 def _joi_en_marche() -> bool:
@@ -940,6 +1145,7 @@ def main(arguments: list[str] | None = None) -> int:
     print(f"{len(resultat.confies)} fichier(s) condensé(s)"
           + (f", {len(resultat.echecs)} en échec : {', '.join(resultat.echecs)}" if resultat.echecs else "")
           + f'.\nPour relire : git -C "{RACINE}" diff {resultat.avant[:10]}'
+          + f'\nFaits déplacés ou retirés, selon la bibliothécaire : git -C "{RACINE}" log -1'
           + f'\nPour tout annuler : git -C "{RACINE}" revert --no-edit {resultat.avant[:10]}..HEAD')
     return 0 if not resultat.echecs else 1
 

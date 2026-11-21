@@ -2,7 +2,7 @@
 
 - contexte_reveil() : la section « Ton compte » du prompt au réveil (date du jour, courriels non lus,
   ta journée et celle de Joi, ses tâches). Elle vient du dernier contexte gardé en mémoire s'il a moins
-  de RAFRAICHIR_MINUTES + 1 min (préparé au démarrage du serveur, rafraîchi toutes les RAFRAICHIR_MINUTES
+  de CACHE_SERVI_MAX, du même jour (préparé au démarrage du serveur, rafraîchi toutes les RAFRAICHIR_MINUTES
   par joi/serveur.py, et en fond après un réveil) : Joi se réveille sans attendre Graph. Sinon, on le
   demande, les blocs en parallèle : 5 s au plus, sinon Joi se réveille sans.
 - verifier() : les courriels arrivés depuis la dernière fois. Chacun entre au journal (en résumé) une
@@ -34,9 +34,18 @@ PREMIERE_FOIS = timedelta(days=1)  # sans état : les courriels des dernières 2
 MARGE = timedelta(minutes=5)  # on redemande un peu avant le dernier vu (les doublons sont écartés)
 VUS_GARDES = 300
 # Le contexte du réveil est rafraîchi à ce rythme, à part de la vérification des courriels
-# (JOI_COURRIEL_VERIFIER_MINUTES, qui peut être d'une heure) : il sert RAFRAICHIR_MINUTES + MARGE_CACHE.
+# (JOI_COURRIEL_VERIFIER_MINUTES, qui peut être d'une heure).
 RAFRAICHIR_MINUTES = 5
-MARGE_CACHE = timedelta(minutes=1)
+# Un contexte gardé du même jour sert tant qu'il a moins de CACHE_SERVI_MAX, avec son heure (« vu à »),
+# et se rafraîchit en fond. Avec 6 min, le premier réveil du matin ou un réveil après une mise en veille
+# attendait Graph (2,5 à 2,9 s) ; au pire, un courriel ou un rendez-vous de la dernière demi-heure manque
+# à la première phrase.
+CACHE_SERVI_MAX = timedelta(minutes=30)
+# Le compte n'est dit « déconnecté » que si les échecs durent depuis tout ce temps : le 20 novembre,
+# une coupure d'une minute (six échecs en rafale) a donné un contexte « déconnecté », puis tout est revenu
+# seul. C'est le temps qui compte, pas le nombre d'échecs : un réveil et une fin de conversation
+# rafraîchissent aussi le contexte, à quelques secondes d'écart.
+DUREE_AVANT_DECONNEXION = timedelta(minutes=RAFRAICHIR_MINUTES - 1)
 
 
 @dataclass
@@ -57,6 +66,10 @@ class Veille:
         self._verrou = threading.Lock()  # une vérification à la fois (réveil et vérification régulière)
         self._cache: _Contexte | None = None
         self._rafraichissement: asyncio.Task | None = None
+        self._coupure_debut: datetime | None = None  # le premier échec d'une déconnexion en cours
+        self._deconnexion_confirmee = False  # un contexte « déconnecté » a été gardé (donc dit)
+        self._coupure_a_dire: tuple[datetime, datetime] | None = None  # une coupure finie, à dire une fois
+        self._deconnexion_dite_le: str | None = None  # le jour où Joi a déjà dit qu'elle est déconnectée
         self._etat = {
             "connecte": None,
             "adresse": None,
@@ -144,15 +157,35 @@ class Veille:
         instant = maintenant()
         if cache.quand.date() != instant.date():  # « aujourd'hui » a changé
             return None
-        if instant - cache.quand > timedelta(minutes=RAFRAICHIR_MINUTES) + MARGE_CACHE:
+        if instant - cache.quand > CACHE_SERVI_MAX:
             return None
         return cache
 
-    @staticmethod
-    def _texte(contexte: _Contexte, depuis_cache: bool) -> str:
+    def _texte(self, contexte: _Contexte, depuis_cache: bool) -> str:
         titre = f"## Ton compte (vu à {contexte.quand:%H:%M})" if depuis_cache else "## Ton compte (au réveil)"
         lignes = [titre, f"Nous sommes le {date_complete()} (heure de {reglages.NOM_FUSEAU})."]
-        return "\n\n" + "\n".join(lignes + contexte.lignes) + "\n"
+        return "\n\n" + "\n".join(lignes + contexte.lignes + self._a_dire(contexte)) + "\n"
+
+    def _a_dire(self, contexte: _Contexte) -> list[str]:
+        """Ce que Joi dit d'elle-même sur son compte, une fois : une déconnexion (le premier réveil du
+        jour), une coupure finie (au réveil qui suit). Le code tient le « une fois », pas le modèle."""
+        lignes = []
+        aujourdhui = maintenant().date().isoformat()
+        if contexte.deconnecte:
+            if self._deconnexion_dite_le != aujourdhui:
+                self._deconnexion_dite_le = aujourdhui
+                lignes.append("Dis-le à la personne dès ta première réplique, en une phrase (« mon compte "
+                              "est déconnecté, il faudra relancer la connexion »), puis n'y reviens que si "
+                              "elle t'en parle.")
+            else:
+                lignes.append("Si la personne te parle de tes courriels ou de l'agenda, dis-le-lui simplement.")
+        elif self._coupure_a_dire:
+            debut, fin = self._coupure_a_dire
+            self._coupure_a_dire = None
+            if debut.date() == maintenant().date():  # une coupure d'un autre jour ne sert plus à rien
+                lignes.append(f"Ton compte a été coupé de {debut:%H:%M} à {fin:%H:%M}. Dis-le en une phrase "
+                              "au début de la conversation.")
+        return lignes
 
     async def contexte_reveil(self) -> str:
         cache = self._cache_valable()
@@ -170,9 +203,9 @@ class Veille:
         except Exception:
             log.exception("Contexte du compte impossible au réveil")
             return ""
-        self._garder(contexte)
-        await self._noter_montrees(contexte)
-        return self._texte(contexte, depuis_cache=False)
+        servi = self._garder(contexte)
+        await self._noter_montrees(servi)
+        return self._texte(servi, depuis_cache=servi is not contexte)
 
     @staticmethod
     async def _noter_montrees(contexte: _Contexte) -> None:
@@ -184,17 +217,41 @@ class Veille:
 
     # --- Le contexte gardé --------------------------------------------------------------------
 
-    def _garder(self, contexte: _Contexte) -> None:
+    def _garder(self, contexte: _Contexte) -> _Contexte:
         """Un contexte incomplet (un bloc en erreur passagère) ne remplace pas un contexte complet : on
-        garde l'ancien, qui dit son heure. Une déconnexion, elle, le remplace : elle ne passera pas seule."""
+        garde l'ancien, qui dit son heure. Une déconnexion le remplace, mais seulement si elle dure
+        depuis DUREE_AVANT_DECONNEXION : une coupure d'une minute passe seule. Rend le contexte à servir
+        à un réveil qui attend : l'ancien, quand c'est lui qui reste à cause d'une déconnexion récente."""
         ancien = self._cache
         if ancien is not None and contexte.quand < ancien.quand:
-            return  # deux rafraîchissements se sont croisés : le plus récent reste
+            return ancien  # deux rafraîchissements se sont croisés : le plus récent reste, et il sert
+        if contexte.deconnecte:
+            if self._coupure_debut is None:
+                self._coupure_debut = contexte.quand
+            if contexte.quand - self._coupure_debut < DUREE_AVANT_DECONNEXION:
+                if ancien is not None and not ancien.deconnecte and ancien.quand.date() == contexte.quand.date():
+                    log.warning("Compte déconnecté à %s : je garde le contexte de %s et je réessaie au "
+                                "prochain rafraîchissement.", f"{contexte.quand:%H:%M}", f"{ancien.quand:%H:%M}")
+                    return ancien
+                # Rien d'utilisable à garder (démarrage, action de Joi, minuit) : une phrase neutre, ni
+                # gardée ni annoncée, tant que la coupure peut encore passer seule.
+                log.warning("Compte déconnecté à %s, sans contexte d'avant : je réessaie au prochain "
+                            "rafraîchissement.", f"{contexte.quand:%H:%M}")
+                return _Contexte(["Ton compte ne répond pas pour l'instant."], contexte.quand, complet=False)
+            self._deconnexion_confirmee = True
+        else:
+            if self._deconnexion_confirmee and self._coupure_debut:
+                self._coupure_a_dire = (self._coupure_debut, contexte.quand)
+                log.info("Compte de nouveau joignable, après une coupure depuis %s.",
+                         f"{self._coupure_debut:%H:%M}")
+            self._deconnexion_confirmee = False
+            self._coupure_debut = None
         if not contexte.complet and not contexte.deconnecte and ancien is not None and ancien.complet:
             log.warning("Contexte du compte pas rafraîchi (%s) : je garde celui de %s.",
                         self._etat.get("derniere_erreur") or "erreur", f"{ancien.quand:%H:%M}")
-            return
+            return contexte
         self._cache = contexte
+        return contexte
 
     def invalider(self) -> None:
         """Joi vient d'agir sur son compte (tâche cochée, événement créé…) : le contexte gardé ne dit
@@ -306,8 +363,8 @@ class Veille:
             self._erreur(e)
         deconnexion = next((e for e in erreurs.values() if isinstance(e, CompteDeconnecte)), None)
         if deconnexion:
-            return _Contexte([f"Ton compte ne fonctionne pas pour l'instant. {deconnexion} Si la personne te "
-                              "parle de tes courriels ou de l'agenda, dis-le-lui simplement."],
+            # Quoi en faire (le dire tout de suite, ou si on en parle) est ajouté au moment de servir.
+            return _Contexte([f"Ton compte ne fonctionne pas pour l'instant. {deconnexion}"],
                              quand, complet=False, deconnecte=True)
         repli = {"courriels": ["Tes courriels ne sont pas disponibles pour l'instant."],
                  "agenda": ["L'agenda n'est pas disponible pour l'instant."], "taches": [], "engagements": []}

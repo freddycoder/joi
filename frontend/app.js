@@ -182,11 +182,21 @@ async function garderEcranAllume() {
   if (!("wakeLock" in navigator) || verrouEcran || document.visibilityState !== "visible") return;
   try {
     verrouEcran = await navigator.wakeLock.request("screen");
-    verrouEcran.addEventListener("release", () => (verrouEcran = null));
+    verrouEcran.addEventListener("release", () => {
+      verrouEcran = null;
+      signalerOnglet("verrou d'éveil relâché");
+    });
     if (mode !== "ecoute") relacherEcran(); // revenu en conversation pendant la demande
   } catch (e) {
     console.warn("Wake Lock refusé :", e);
+    signalerOnglet("verrou d'éveil refusé");
   }
+}
+
+// En écoute, le serveur note l'état de la page dans son journal : si l'audio s'arrête ensuite (onglet
+// gelé, portable en veille), la cause du trou se lira à côté de l'alerte.
+function signalerOnglet(etat) {
+  if (mode === "ecoute" && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "onglet", etat }));
 }
 
 function relacherEcran() {
@@ -195,6 +205,7 @@ function relacherEcran() {
 }
 
 document.addEventListener("visibilitychange", () => {
+  signalerOnglet(document.visibilityState === "visible" ? "visible" : "cachee");
   if (mode === "ecoute") garderEcranAllume();
 });
 
@@ -268,7 +279,7 @@ function appliquerMode(nouveau) {
 $("mode").addEventListener("click", () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   $("mode").disabled = true; // jusqu'à la confirmation du serveur
-  ws.send(JSON.stringify({ type: "mode", mode: mode === "ecoute" ? "conversation" : "ecoute" }));
+  ws.send(JSON.stringify({ type: "mode", mode: mode === "ecoute" ? "conversation" : "ecoute", raison: "bouton" }));
 });
 
 // ---------- Connexion au serveur ----------
@@ -371,7 +382,7 @@ function reprendreApresCoupure(modeServeur) {
   reprise = null;
   afficherErreur("Liaison rétablie.");
   if (modeVoulu === "ecoute" && modeServeur !== "ecoute") {
-    ws.send(JSON.stringify({ type: "mode", mode: "ecoute" }));
+    ws.send(JSON.stringify({ type: "mode", mode: "ecoute", raison: "reprise après coupure" }));
     relancerCompteurEnregistrement();
     return true;
   }

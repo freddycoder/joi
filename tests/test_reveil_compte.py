@@ -57,6 +57,19 @@ def faux():
     return FauxLent()
 
 
+@pytest.fixture(autouse=True)
+def midi(monkeypatch):
+    """Midi, toujours : reculer le contexte gardé de 20 ou 31 min ne doit pas le faire tomber la veille
+    quand les tests tournent juste après minuit."""
+    instant = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+    debut = datetime.now().astimezone()
+
+    def maintenant_fige():
+        return instant + (datetime.now().astimezone() - debut)
+
+    monkeypatch.setattr(veille, "maintenant", maintenant_fige)
+
+
 def test_premier_contexte_en_parallele(faux):
     v = veille.Veille(faux)
     debut = time.monotonic()
@@ -99,7 +112,7 @@ def test_cache_trop_vieux_ou_d_hier(faux):
     async def scenario():
         v = veille.Veille(faux)
         await v.preparer()
-        v._cache.quand -= timedelta(minutes=7)  # plus de RAFRAICHIR_MINUTES + 1
+        v._cache.quand -= timedelta(minutes=31)  # plus de CACHE_SERVI_MAX
         faux.appels.clear()
         await v.contexte_reveil()
         vieux = sorted(faux.appels)
@@ -148,17 +161,160 @@ def test_erreur_pendant_le_rafraichissement_garde_l_ancien(faux, caplog):
     assert "Microsoft ne répond pas" in v.etat()["derniere_erreur"]
 
 
-def test_deconnexion_pendant_le_rafraichissement_remplace_le_cache(faux):
+def test_une_deconnexion_d_un_rafraichissement_garde_l_ancien(faux, caplog):
+    """Plan Joi fiable, partie 2 : une coupure d'une minute ne fait plus un contexte « déconnecté »."""
     async def scenario():
         v = veille.Veille(faux)
         await v.preparer()
         faux.panne = CompteDeconnecte("jeton expiré")
         await v.rafraichir()
         faux.panne = None
+        faux.appels.clear()
         return await v.contexte_reveil()
 
     texte = asyncio.run(scenario())
-    assert "ne fonctionne pas pour l'instant" in texte
+    assert "ne fonctionne pas pour l'instant" not in texte and "Bonjour" in texte
+    assert "je garde le contexte de" in caplog.text
+
+
+def test_deux_echecs_rapproches_gardent_l_ancien(faux):
+    """Le 20 novembre : six échecs en une minute (rafraîchissement, réveil, fin de conversation)."""
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        faux.panne = CompteDeconnecte("jeton expiré")
+        await v.rafraichir()
+        await v.rafraichir()
+        await v.rafraichir()
+        faux.panne = None
+        await v.rafraichir()
+        return await v.contexte_reveil()
+
+    texte = asyncio.run(scenario())
+    assert "ne fonctionne pas" not in texte and "coupé de" not in texte
+
+
+def test_une_deconnexion_qui_dure_remplace_le_cache(faux):
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        faux.panne = CompteDeconnecte("jeton expiré")
+        await v.rafraichir()
+        v._coupure_debut -= veille.DUREE_AVANT_DECONNEXION  # les échecs durent depuis assez longtemps
+        await v.rafraichir()
+        faux.panne = None
+        premier = await v.contexte_reveil()
+        await v.attendre_rafraichissement()
+        return premier
+
+    premier = asyncio.run(scenario())
+    assert "ne fonctionne pas pour l'instant" in premier
+    assert "dès ta première réplique" in premier
+
+
+def test_deconnexion_dite_une_fois_par_jour(faux):
+    async def scenario():
+        v = veille.Veille(faux)
+        faux.panne = CompteDeconnecte("jeton expiré")
+        v._coupure_debut = maintenant() - veille.DUREE_AVANT_DECONNEXION  # les échecs durent déjà
+        textes = [await v.contexte_reveil(), await v.contexte_reveil()]
+        v._deconnexion_dite_le = "2000-01-01"  # un autre jour
+        textes.append(await v.contexte_reveil())
+        return textes
+
+    premier, deuxieme, lendemain = asyncio.run(scenario())
+    assert all("ne fonctionne pas pour l'instant" in t for t in (premier, deuxieme, lendemain))
+    assert "dès ta première réplique" in premier
+    assert "dès ta première réplique" not in deuxieme
+    assert "Si la personne te parle de tes courriels" in deuxieme
+    assert "Si la personne te parle de tes courriels" not in premier  # une seule consigne à la fois
+    assert "dès ta première réplique" in lendemain
+
+
+def test_la_reconnexion_dit_les_heures_de_la_coupure(faux):
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        faux.panne = CompteDeconnecte("jeton expiré")
+        await v.rafraichir()
+        v._coupure_debut -= veille.DUREE_AVANT_DECONNEXION
+        debut = v._coupure_debut
+        await v.rafraichir()
+        faux.panne = None
+        await v.rafraichir()
+        apres = await v.contexte_reveil()
+        encore = await v.contexte_reveil()
+        return debut, apres, encore
+
+    debut, apres, encore = asyncio.run(scenario())
+    assert f"coupé de {debut:%H:%M} à" in apres
+    assert "coupé de" not in encore  # une seule fois
+
+
+def test_une_coupure_d_une_minute_n_est_pas_annoncee(faux):
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        faux.panne = CompteDeconnecte("jeton expiré")
+        await v.rafraichir()
+        faux.panne = None
+        await v.rafraichir()
+        return await v.contexte_reveil()
+
+    assert "coupé de" not in asyncio.run(scenario())
+
+
+# --- Le jeton : la vraie raison, et un second essai -------------------------------------------------
+
+class FausseAppMsal:
+    """Rend, à chaque appel, le résultat suivant de la liste (None, une erreur, ou un jeton)."""
+
+    def __init__(self, resultats):
+        self.resultats = list(resultats)
+        self.appels = 0
+
+    def get_accounts(self):
+        return [{"username": "joi@exemple.org"}]
+
+    def acquire_token_silent_with_error(self, portees, account, force_refresh=False):
+        self.appels += 1
+        return self.resultats.pop(0)
+
+
+def _microsoft(app, monkeypatch):
+    from joi.compte import microsoft
+
+    monkeypatch.setattr(microsoft, "PAUSE_AVANT_REESSAI", 0)
+    return microsoft.Microsoft(http=object(), application=app)
+
+
+def test_jeton_un_echec_puis_un_succes(monkeypatch, caplog):
+    app = FausseAppMsal([{"error": "temporarily_unavailable", "error_description": "Réessaie\nplus tard"},
+                         {"access_token": "abc"}])
+    assert _microsoft(app, monkeypatch)._jeton() == "abc"
+    assert app.appels == 2
+    assert "temporarily_unavailable (Réessaie)" in caplog.text
+
+
+def test_jeton_refus_net_sans_second_essai(monkeypatch):
+    app = FausseAppMsal([{"error": "invalid_grant", "error_description": "AADSTS70000"}])
+    with pytest.raises(CompteDeconnecte, match="invalid_grant"):
+        _microsoft(app, monkeypatch)._jeton()
+    assert app.appels == 1
+
+
+def test_jeton_deux_echecs_donne_la_vraie_raison(monkeypatch):
+    app = FausseAppMsal([{"error": "server_error"}, {"error": "server_error"}])
+    with pytest.raises(CompteDeconnecte, match="server_error"):
+        _microsoft(app, monkeypatch)._jeton()
+    assert app.appels == 2
+
+
+def test_jeton_cache_vide(monkeypatch):
+    app = FausseAppMsal([None])
+    with pytest.raises(CompteDeconnecte, match="jeton expiré"):
+        _microsoft(app, monkeypatch)._jeton()
+    assert app.appels == 1
 
 
 def test_sans_cache_une_erreur_donne_un_contexte_partiel(faux):
@@ -203,3 +359,84 @@ def test_trop_lent_au_reveil(faux, monkeypatch):
     v = veille.Veille(faux)
     assert asyncio.run(v.contexte_reveil()) == ""
     assert "trop lent" in v.etat()["derniere_erreur"]
+
+
+def test_jeton_un_echec_vaut_pour_les_autres_fils(monkeypatch):
+    """Les blocs du contexte du réveil partent ensemble : un seul fait les deux essais."""
+    from concurrent.futures import ThreadPoolExecutor
+    from joi.compte import microsoft
+
+    app = FausseAppMsal([{"error": "server_error"}] * 10)
+    m = _microsoft(app, monkeypatch)
+    monkeypatch.setattr(microsoft, "PAUSE_AVANT_REESSAI", 0.3)
+
+    def un_bloc():
+        try:
+            m._jeton()
+        except CompteDeconnecte as e:
+            return str(e)
+
+    debut = time.monotonic()
+    with ThreadPoolExecutor(3) as fils:
+        raisons = list(fils.map(lambda _: un_bloc(), range(3)))
+    assert app.appels == 2
+    assert all("server_error" in r for r in raisons)
+    assert time.monotonic() - debut < 1.0
+
+
+def test_coupure_courte_sans_contexte_d_avant_ni_gardee_ni_annoncee(faux):
+    """Au démarrage, après une action de Joi ou après minuit, il n'y a rien à garder : une phrase
+    neutre, et rien d'annoncé quand le compte revient une minute plus tard."""
+    async def scenario():
+        v = veille.Veille(faux)
+        faux.panne = CompteDeconnecte("jeton expiré")
+        pendant = await v.contexte_reveil()
+        garde = v._cache
+        faux.panne = None
+        apres = await v.contexte_reveil()
+        return pendant, garde, apres
+
+    pendant, garde, apres = asyncio.run(scenario())
+    assert "ne répond pas pour l'instant" in pendant
+    assert "dès ta première réplique" not in pendant and "ne fonctionne pas" not in pendant
+    assert garde is None
+    assert "coupé de" not in apres and "Bonjour" in apres
+
+
+def test_rafraichissements_croises_le_plus_recent_sert(faux):
+    v = veille.Veille(faux)
+    recent = veille._Contexte(["récent"], datetime.now().astimezone())
+    v._garder(recent)
+    vieux = veille._Contexte(["déconnecté"], recent.quand - timedelta(seconds=30), complet=False, deconnecte=True)
+    assert v._garder(vieux) is recent
+
+
+def test_jeton_erreur_reseau_un_second_essai_puis_ne_repond_pas(monkeypatch):
+    class AppReseau(FausseAppMsal):
+        def acquire_token_silent_with_error(self, portees, account, force_refresh=False):
+            self.appels += 1
+            raise ConnectionError("réseau coupé")
+
+    app = AppReseau([])
+    with pytest.raises(ErreurCompte, match="ne répond pas") as e:
+        _microsoft(app, monkeypatch)._jeton()
+    assert not isinstance(e.value, CompteDeconnecte)
+    assert app.appels == 2
+
+
+def test_contexte_de_20_min_servi_sans_attente(faux):
+    """Plan Joi fiable, partie 4 : moins de CACHE_SERVI_MAX (30 min), le contexte gardé sert tout de suite."""
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        v._cache.quand -= timedelta(minutes=20)
+        faux.appels.clear()
+        debut = time.monotonic()
+        texte = await v.contexte_reveil()
+        duree = time.monotonic() - debut
+        await v.attendre_rafraichissement()
+        return texte, duree
+
+    texte, duree = asyncio.run(scenario())
+    assert duree < PAUSE / 2
+    assert "## Ton compte (vu à" in texte

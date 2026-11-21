@@ -53,8 +53,11 @@ derniers événements du serveur), `Alt+I` les deux, `Échap` les ferme. L'holog
 **Latence.** Chaque réponse ajoute une ligne « Latence : » au journal technique, et le bloc « Latence » du
 monitoring montre la dernière réponse et la médiane : fin de tour (AssemblyAI décide que tu as fini de
 parler), cerveau (premier mot, première phrase), synthèse de la voix, début de la lecture, et le total de
-la fin de ta phrase au premier son. La ligne dit aussi le modèle (« défaut » sans `JOI_MODELE`), les
-recherches et consultations du compte, et, après une phrase d'attente, quand la vraie réponse s'est fait entendre. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
+la fin de ta phrase au premier son. La ligne dit aussi le modèle (« défaut » sans `JOI_MODELE`, suivi
+du modèle qui a vraiment répondu d'après Copilot), les jetons du tour (entrée, sortie, réflexion), les
+recherches et consultations du compte, et, après une phrase d'attente, quand la vraie réponse s'est fait
+entendre. Chaque retour en écoute note sa raison (bouton, commande vocale, reprise après coupure) et le
+nombre de tours de la conversation. Pour régler la fin de tour : `JOI_FIN_TOUR_MODE` et
 `JOI_FIN_TOUR_SILENCE_MIN_MS` / `_MAX_MS` dans `.env` (vides : les valeurs d'AssemblyAI). Pour comparer
 les modèles Copilot, sans micro : `.venv\Scripts\python -m joi.banc MODELE1 MODELE2` (chaque phrase
 consomme une requête Copilot ; `--lister`, `--phrases N`). Il ne change pas `JOI_MODELE`.
@@ -119,7 +122,11 @@ lui donne le résumé complet de cette journée. Si tu lui parles avant, elle sa
 n'est pas fini : elle cherche ce qui est déjà appris et dit ce qui manque encore, sans l'inventer.
 
 Pendant l'écoute, l'écran reste allumé (Wake Lock) pour que le PC ne se mette pas en veille.
-Garde l'onglet ouvert et branche le portable.
+Garde l'onglet ouvert et branche le portable. Si l'audio s'arrête quand même (micro débranché, onglet
+gelé), l'alerte se répète au journal et à la page (à 35 s, à 5 min, puis toutes les 15 min). Le journal
+note aussi quand l'onglet est caché ou que le verrou d'éveil est relâché. La fin de l'écoute donne la
+durée de la séance et les plages sans audio. Une plage de plus de 5 min est dite à Joi au retour et
+notée dans la journée.
 
 **Coupures.** Si la liaison avec le serveur tombe (Joi relancée, portable sorti de veille), la page se
 reconnecte seule, sans clic, et reprend l'écoute : l'indicateur rouge clignote et affiche « interrompu »
@@ -215,10 +222,15 @@ En conversation, elle peut :
   essaierais le CRM aujourd'hui, je t'en fais une tâche ? »). Seules tes phrases à toi (ta voix
   reconnue) comptent ; chaque engagement est proposé une fois, et seul ton oui en fait une tâche, jamais
   un courriel ni une invitation. Les propositions sont dans `donnees/compte/propositions.json`.
+- te proposer de noter dans son agenda une échéance de sa mémoire qui a une heure (« je le note dans
+  mon agenda ? ») : seul ton oui, dit à l'instant, crée l'événement, toujours sans invitation (donc sans
+  rappel sur ton téléphone).
 
 Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches : ce contexte
 est préparé au démarrage et rafraîchi toutes les 5 minutes (quand personne n'est là, les nouveaux
-courriels sont alors notés sans annonce), pour qu'elle se réveille sans attendre Microsoft. Pendant la
+courriels sont alors notés sans annonce), pour qu'elle se réveille sans attendre Microsoft. Un contexte
+du même jour de moins de 30 minutes sert tel quel (« vu à … ») et se rafraîchit pendant qu'elle parle :
+au pire, un courriel ou un rendez-vous de la dernière demi-heure manque à sa première phrase. Pendant la
 conversation, elle vérifie ses courriels toutes les 5 minutes (`JOI_COURRIEL_VERIFIER_MINUTES`) et annonce
 ceux qui semblent utiles quand personne ne parle depuis 10 s ; les infolettres, les publicités et l'onglet
 « Autres » sont seulement notés au journal. En mode écoute, elle les garde pour ton retour (« Pendant que
@@ -273,8 +285,11 @@ que la session Copilot de Joi lance elle-même. La bibliothécaire n'y a pas acc
 ```
 
 Les panneaux `Alt+P` et `Alt+M` ont un groupe « Compte » (connexion, dernière vérification, dernière
-erreur). Si le jeton expire (90 jours sans usage, mot de passe changé), Joi le dit, et il suffit de
-relancer `connecter`. Le journal du serveur MCP est dans `donnees/logs/compte.log`.
+erreur). Si le jeton expire (90 jours sans usage, mot de passe changé), Joi le dit d'elle-même à sa
+première réplique, une fois par jour, et il suffit de relancer `connecter`. Une coupure de quelques
+minutes est tue (l'ancien contexte reste servi) ; quand le compte revient, Joi donne l'heure de la
+coupure. Le journal donne la vraie raison du refus de Microsoft ; celui du serveur MCP est dans
+`donnees/logs/compte.log`.
 
 **Vie privée.** Les courriels de Joi passent par Copilot, comme le reste de vos conversations. La
 mémoire suit la même règle qu'en écoute : ce qui te concerne, pas de dossier sur les expéditeurs.
@@ -291,14 +306,20 @@ donnees/
 ├── empreintes/                ton empreinte vocale, et celles du jour (anonymes, effacées le soir)
 ├── logs/                      journal technique de Joi
 ├── compte/                    compte de Joi (optionnel) : jetons chiffrés, brouillons, dernier courriel vu
+├── echeances-dites.json       les échéances dont elle a déjà eu la consigne de parler aujourd'hui
 └── memoire/                   ses souvenirs en Markdown, organisés librement par Joi
     ├── toi.md                 l'essentiel sur toi, lu à chaque réveil
     ├── index.md               la carte de sa mémoire, lue à chaque réveil
+    ├── echeances.md           les dates à venir qui t'engagent, une ligne chacune
     └── journees/              un résumé par journée d'écoute
 ```
 
 - **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité (3 500 caractères au plus
-  chacun ; un fichier coupé est signalé au journal technique).
+  chacun ; un fichier coupé est signalé au journal technique). S'y ajoutent, sous « À venir », les
+  lignes de `echeances.md` datées d'aujourd'hui à dans 7 jours (5 au plus, au format
+  `- AAAA-MM-JJ[ HH:MM] : quoi (journees/AAAA-MM-JJ.md)` ; les autres sont ignorées et comptées au
+  journal technique). S'il y en a une d'aujourd'hui ou de demain, elle en dit une au début de la
+  conversation, une fois par jour.
 - **En conversation**, elle peut chercher un détail avec l'outil `se_souvenir`
   (dans ses fichiers, puis dans le journal).
 - **Après une conversation ou une écoute** (et 5 minutes après le démarrage si personne ne lui parle,
@@ -315,7 +336,9 @@ sur place). Pour resserrer une mémoire écrite avant ces règles, une fois, Joi
 `python -m joi.memoire condenser`. La bibliothécaire reprend les journées de plus de 8 Ko, les autres
 fichiers de plus de 6 Ko, `toi.md` et `index.md`, entre un commit « Avant » et un commit « Après ».
 La commande refuse de partir si Joi tourne ou si l'état d'avant ne peut pas être enregistré, et affiche
-à la fin la commande `git diff` pour relire et la commande `git revert` pour tout annuler.
+à la fin la commande `git diff` pour relire et la commande `git revert` pour tout annuler. Le
+commit « Après » liste les faits que la bibliothécaire dit avoir déplacés ou retirés : une décision,
+une échéance ou un suivi ouvert ne doit jamais disparaître.
 
 Pour repartir à zéro, supprime `donnees/memoire/`,
 `donnees/journal/` et `donnees/enregistrements/`.
