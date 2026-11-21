@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -44,6 +45,24 @@ TAILLE_MAX_SOUVENIR = 3000  # caractères renvoyés par se_souvenir (fichiers tr
 TAILLE_MAX_JOURNEE = 16000  # en plus : le résumé des journées nommées (« aujourd'hui », « 16 novembre »)
 TAILLE_MAX_TRANCHE = 20000  # caractères de journal envoyés par message à la bibliothécaire
 DELAI_CONSOLIDATION = 600  # secondes accordées à une tranche de consolidation
+
+# Les échéances (plan Joi fiable, partie 5) : la bibliothécaire tient echeances.md, une ligne par date
+# qui engage la personne. Le code n'en croit que les lignes bien formées : la mémoire est écrite par un
+# modèle à partir de ce qui a été entendu, une ligne ratée ne doit ni casser le réveil ni s'y glisser.
+FICHIER_ECHEANCES = "echeances.md"
+ECHEANCES_JOURS = 7  # d'aujourd'hui à dans 7 jours
+ECHEANCES_MAX = 5  # les plus proches d'abord
+ECHEANCE_TEXTE_MAX = 200  # caractères du « quoi » d'une ligne
+# Hors de la mémoire (qui a son propre git, réécrit par la bibliothécaire) : date → échéances (jour et
+# heure) déjà données avec la consigne d'en parler, pour ne la donner qu'une fois par jour.
+FICHIER_ECHEANCES_DITES = config.DOSSIER_DONNEES / "echeances-dites.json"
+# Ce que le dernier contexte_reveil a donné, à noter par noter_echeances_dites() une fois la session
+# créée : un réveil raté ou le banc d'essai ne doivent pas épuiser la consigne du jour.
+_echeances_a_noter: tuple[date, set[str]] | None = None
+_LIGNE_ECHEANCE = re.compile(
+    r"-\s*(\d{4}-\d\d-\d\d)(?:\s+(\d\d):(\d\d))?\s*:\s*(.+?)\s*\(journees/\d{4}-\d\d-\d\d\.md\)\s*")
+CONSIGNE_ECHEANCE = ("Au début de la conversation, mentionne au plus une chose d'aujourd'hui ou de demain, "
+                     "en une phrase, une fois.")
 
 INDEX_DEPART = """---
 description: Carte de la mémoire de Joi, une ligne par fichier.
@@ -176,8 +195,9 @@ def _fichiers_md() -> list[Path]:
     )
 
 
-def contexte_reveil() -> str:
-    """Ce que Joi sait déjà, à ajouter à son prompt système."""
+def contexte_reveil(aujourdhui: date | None = None) -> str:
+    """Ce que Joi sait déjà, à ajouter à son prompt système : toi.md, l'index, et les échéances des
+    prochains jours."""
     morceaux = []
     for nom in ("toi.md", "index.md"):
         fichier = RACINE / nom
@@ -191,7 +211,117 @@ def contexte_reveil() -> str:
                 contenu = _couper(contenu, TAILLE_MAX_REVEIL_FICHIER)
             morceaux.append(f"### {nom}\n{contenu}")
     texte = "\n\n".join(morceaux)
-    return f"\n\n## Ce que tu sais déjà (ta mémoire)\n{texte}\n" if texte else ""
+    texte = f"\n\n## Ce que tu sais déjà (ta mémoire)\n{texte}\n" if texte else ""
+    return texte + _a_venir(aujourdhui or date.today())
+
+
+@dataclass
+class Echeance:
+    jour: date
+    heure: str  # « HH:MM », ou vide
+    quoi: str
+    ligne: str  # la ligne du fichier, telle quelle
+
+    @property
+    def cle(self) -> str:
+        """La clé de « déjà dite » : le jour et l'heure, pas le texte, que la bibliothécaire reformule
+        à chaque passe (sans quoi la consigne reviendrait au réveil suivant)."""
+        return f"{self.jour.isoformat()} {self.heure}".strip()
+
+
+def echeances_a_venir(aujourdhui: date) -> list[Echeance]:
+    """Les lignes bien formées de echeances.md datées d'aujourd'hui à dans ECHEANCES_JOURS jours, les
+    plus proches d'abord, ECHEANCES_MAX au plus. Les lignes mal formées ou passées sont comptées au
+    journal (pour voir si la bibliothécaire tient le format), jamais servies."""
+    fichier = RACINE / FICHIER_ECHEANCES
+    try:
+        lignes = fichier.read_text(encoding="utf-8").splitlines() if fichier.exists() else []
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning("Échéances illisibles (%s) : ignorées.", e)
+        return []
+    gardees: list[Echeance] = []
+    mal_formees = passees = trop_loin = 0
+    for brute in lignes:
+        ligne = brute.strip()
+        if not ligne.startswith("-") or ligne.startswith("---"):
+            continue  # en-tête, titre, ligne vide
+        m = _LIGNE_ECHEANCE.fullmatch(ligne)
+        try:
+            jour = date.fromisoformat(m[1]) if m else None
+            if m and m[2] and not (int(m[2]) < 24 and int(m[3]) < 60):
+                jour = None
+        except ValueError:
+            jour = None
+        if jour is None:
+            mal_formees += 1
+        elif jour < aujourdhui:
+            passees += 1
+        elif (jour - aujourdhui).days > ECHEANCES_JOURS:
+            trop_loin += 1
+        else:
+            gardees.append(Echeance(jour, f"{m[2]}:{m[3]}" if m[2] else "", m[4][:ECHEANCE_TEXTE_MAX], ligne))
+    if mal_formees or passees:
+        log.info("Échéances : %d gardée(s), %d mal formée(s), %d passée(s), %d au-delà de %d jours.",
+                 len(gardees), mal_formees, passees, trop_loin, ECHEANCES_JOURS)
+    gardees.sort(key=lambda e: (e.jour, e.heure or "99:99"))
+    return gardees[:ECHEANCES_MAX]
+
+
+def _jour_dit(jour: date, aujourdhui: date) -> str:
+    from .compte.modele import _date_ecrite
+
+    ecrit = _date_ecrite(jour, annee=jour.year != aujourdhui.year)
+    return {0: "aujourd'hui", 1: f"demain, {ecrit}"}.get((jour - aujourdhui).days, ecrit)
+
+
+def _deja_dites(aujourdhui: date) -> set[str]:
+    try:
+        etat = json.loads(FICHIER_ECHEANCES_DITES.read_text(encoding="utf-8"))
+        return set(etat.get(aujourdhui.isoformat(), [])) if isinstance(etat, dict) else set()
+    except (OSError, ValueError, TypeError):
+        return set()  # absent ou illisible : au pire, la consigne revient une fois de plus
+
+
+def noter_echeances_dites() -> None:
+    """Note comme données les échéances que le dernier contexte_reveil a confiées avec la consigne.
+    Appelée par le cerveau une fois la session créée, jamais par le banc d'essai."""
+    global _echeances_a_noter
+    if _echeances_a_noter is None:
+        return
+    aujourdhui, cles = _echeances_a_noter
+    _echeances_a_noter = None
+    _noter_dites(aujourdhui, _deja_dites(aujourdhui) | cles)
+
+
+def _noter_dites(aujourdhui: date, lignes: set[str]) -> None:
+    # Seulement aujourd'hui : l'état d'hier ne sert plus à rien.
+    try:
+        FICHIER_ECHEANCES_DITES.parent.mkdir(parents=True, exist_ok=True)
+        FICHIER_ECHEANCES_DITES.write_text(
+            json.dumps({aujourdhui.isoformat(): sorted(lignes)}, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError as e:
+        log.warning("Échéances déjà dites : état pas écrit (%s).", e)
+
+
+def _a_venir(aujourdhui: date) -> str:
+    """La section « À venir » du réveil. Les lignes viennent de la mémoire, donc de ce qui a été entendu :
+    elles passent par externe() (une donnée, jamais une consigne). La consigne d'en parler n'est donnée
+    qu'au premier réveil du jour qui a une échéance d'aujourd'hui ou de demain pas encore donnée."""
+    global _echeances_a_noter
+    _echeances_a_noter = None
+    echeances = echeances_a_venir(aujourdhui)
+    if not echeances:
+        return ""
+    from .compte.modele import externe
+
+    lignes = "\n".join(f"- {_jour_dit(e.jour, aujourdhui)}{', ' + e.heure if e.heure else ''} : {e.quoi}"
+                       for e in echeances)
+    texte = f"\n## À venir (les {ECHEANCES_JOURS} prochains jours, d'après ta mémoire)\n{externe(lignes)}\n"
+    proches = {e.cle for e in echeances if (e.jour - aujourdhui).days <= 1}
+    if proches - _deja_dites(aujourdhui):
+        _echeances_a_noter = (aujourdhui, proches)
+        texte += CONSIGNE_ECHEANCE + "\n"
+    return texte
 
 
 # --- Outil de la conversation -----------------------------------------------------------------

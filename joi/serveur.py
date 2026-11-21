@@ -49,7 +49,9 @@ Joi se réveille sans attendre Microsoft, avec un contexte qui dit l'heure où i
 n'est là, les nouveaux courriels sont notés au journal à ce même rythme, sans annonce. Après chaque
 écoute apprise, une passe du modèle sans outils relève ce que la personne a dit qu'elle ferait
 (joi/compte/engagements.py, le code trie) ; Joi le lui propose au réveil, une fois, et seul un oui de
-la personne en fait une tâche (jamais un courriel ni une invitation). Sans compte, rien de tout ça.
+la personne en fait une tâche (jamais un courriel ni une invitation). Une échéance de « À venir »
+(joi/memoire.py, echeances.md) avec une heure peut être proposée pour l'agenda de Joi : seul un oui
+récent la crée, sans invité (joi/compte/integration.py). Sans compte, rien de tout ça.
 
 Avant l'annonce, Joi sait déjà que ces courriels sont arrivés : leur nombre (rien d'écrit par un
 tiers) part, en note, devant le tour suivant de la personne, et elle les lit avec ses outils si on

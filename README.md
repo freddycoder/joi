@@ -222,6 +222,9 @@ En conversation, elle peut :
   essaierais le CRM aujourd'hui, je t'en fais une tâche ? »). Seules tes phrases à toi (ta voix
   reconnue) comptent ; chaque engagement est proposé une fois, et seul ton oui en fait une tâche, jamais
   un courriel ni une invitation. Les propositions sont dans `donnees/compte/propositions.json`.
+- te proposer de noter dans son agenda une échéance de sa mémoire qui a une heure (« je le note dans
+  mon agenda ? ») : seul ton oui, dit à l'instant, crée l'événement, toujours sans invitation (donc sans
+  rappel sur ton téléphone).
 
 Au réveil, elle connaît la date, ses courriels non lus, ta journée, la sienne et ses tâches : ce contexte
 est préparé au démarrage et rafraîchi toutes les 5 minutes (quand personne n'est là, les nouveaux
@@ -303,14 +306,20 @@ donnees/
 ├── empreintes/                ton empreinte vocale, et celles du jour (anonymes, effacées le soir)
 ├── logs/                      journal technique de Joi
 ├── compte/                    compte de Joi (optionnel) : jetons chiffrés, brouillons, dernier courriel vu
+├── echeances-dites.json       les échéances dont elle a déjà eu la consigne de parler aujourd'hui
 └── memoire/                   ses souvenirs en Markdown, organisés librement par Joi
     ├── toi.md                 l'essentiel sur toi, lu à chaque réveil
     ├── index.md               la carte de sa mémoire, lue à chaque réveil
+    ├── echeances.md           les dates à venir qui t'engagent, une ligne chacune
     └── journees/              un résumé par journée d'écoute
 ```
 
 - **Au réveil**, `toi.md` et `index.md` sont ajoutés à sa personnalité (3 500 caractères au plus
-  chacun ; un fichier coupé est signalé au journal technique).
+  chacun ; un fichier coupé est signalé au journal technique). S'y ajoutent, sous « À venir », les
+  lignes de `echeances.md` datées d'aujourd'hui à dans 7 jours (5 au plus, au format
+  `- AAAA-MM-JJ[ HH:MM] : quoi (journees/AAAA-MM-JJ.md)` ; les autres sont ignorées et comptées au
+  journal technique). S'il y en a une d'aujourd'hui ou de demain, elle en dit une au début de la
+  conversation, une fois par jour.
 - **En conversation**, elle peut chercher un détail avec l'outil `se_souvenir`
   (dans ses fichiers, puis dans le journal).
 - **Après une conversation ou une écoute** (et 5 minutes après le démarrage si personne ne lui parle,

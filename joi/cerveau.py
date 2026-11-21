@@ -116,9 +116,11 @@ class Cerveau:
     """modele : le modèle Copilot (JOI_MODELE par défaut ; le banc d'essai en essaie d'autres).
     avec_compte : brancher le compte de Joi s'il est réglé (le banc d'essai s'en passe)."""
 
-    def __init__(self, modele: str | None = config.JOI_MODELE, avec_compte: bool = True):
+    def __init__(self, modele: str | None = config.JOI_MODELE, avec_compte: bool = True,
+                 noter_echeances: bool = True):
         self.modele = modele
         self._avec_compte = avec_compte
+        self._noter_echeances = noter_echeances  # faux pour le banc d'essai (voir memoire._a_venir)
         self.usage: dict = {}  # le dernier tour : modèle réel, jetons (voir _noter_usage)
         # La dernière réponse, pour la mesure de la latence (time.monotonic) : l'envoi du message,
         # et l'arrivée du premier morceau de texte.
@@ -181,6 +183,9 @@ class Cerveau:
             self._client = await client_partage(neuf=True)
             self._session = await nouvelle_session(self._client)
         self._session.on(self._sur_evenement)
+        if self._noter_echeances:
+            # La consigne « parle d'une échéance » est maintenant dans une vraie session : une fois par jour.
+            memoire.noter_echeances_dites()
 
     async def arreter(self) -> None:
         """Ferme la session ; le client partagé reste ouvert pour la conversation suivante."""
