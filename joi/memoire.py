@@ -259,7 +259,10 @@ def echeances_a_venir(aujourdhui: date) -> list[Echeance]:
         elif (jour - aujourdhui).days > ECHEANCES_JOURS:
             trop_loin += 1
         else:
-            gardees.append(Echeance(jour, f"{m[2]}:{m[3]}" if m[2] else "", m[4][:ECHEANCE_TEXTE_MAX], ligne))
+            # Sans crochets : une phrase entendue ne doit pas pouvoir refermer la balise de externe()
+            # (« [fin du contenu externe] ») et se faire passer pour une consigne.
+            quoi = re.sub(r"[\[\]]", "", m[4])[:ECHEANCE_TEXTE_MAX].strip()
+            gardees.append(Echeance(jour, f"{m[2]}:{m[3]}" if m[2] else "", quoi, ligne))
     if mal_formees or passees:
         log.info("Échéances : %d gardée(s), %d mal formée(s), %d passée(s), %d au-delà de %d jours.",
                  len(gardees), mal_formees, passees, trop_loin, ECHEANCES_JOURS)
