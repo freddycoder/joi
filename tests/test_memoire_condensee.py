@@ -224,3 +224,141 @@ def test_consignes_de_la_bibliothecaire_avec_l_adresse_de_la_personne(monkeypatc
     monkeypatch.setattr(reglages, "PROPRIETAIRE", "personne@exemple.org")
     consignes = memoire._consignes_bibliothecaire()
     assert "personne@exemple.org" in consignes and "{adresse_toi}" not in consignes
+
+
+# --- Plan Joi fiable, partie 1 : une mémoire juste ------------------------------------------------
+
+def _voix(nom: str, classe: str, secondes: float) -> dict:
+    from datetime import datetime
+
+    debut = datetime(2026, 11, 19, 9, 0)
+    return {"nom": nom, "classe": classe, "duree_s": secondes, "plages": [["09:00", "09:10"]],
+            "debut": debut}
+
+
+def test_voix_entendues_une_ligne_pour_toutes_les_inconnues():
+    from joi import empreintes
+
+    voix = [_voix("toi", "connue", 960), _voix("Bruno", "connue", 1620), _voix("Denis", "connue", 47)]
+    voix += [_voix(f"voix inconnue {i}", "interlocuteur", 120) for i in range(6)]
+    voix += [_voix(f"voix inconnue {i}", "passage", 5) for i in range(10, 24)]
+    texte = empreintes.texte_bilan({"voix": voix})
+    puces = [ligne for ligne in texte.splitlines() if ligne.startswith("- ")]
+    assert len(puces) == 4, puces
+    assert puces[-1].startswith("- 20 voix inconnues, ") and "dont 14 de passage" in puces[-1]
+    assert "voix inconnue 3" not in texte.lower()
+
+
+def test_voix_entendues_sans_toi_avec_deux_inconnues():
+    from joi import empreintes
+
+    voix = [_voix("voix inconnue 1", "interlocuteur", 300), _voix("voix inconnue 2", "interlocuteur", 120)]
+    texte = empreintes.texte_bilan({"voix": voix})
+    assert "- Toi : voix pas reconnue" in texte and "ci-dessous" in texte
+    assert "- 2 voix inconnues, 7 min en tout." in texte
+    assert "voix inconnue 1" not in texte.lower()
+
+
+def test_voix_entendues_sans_toi_ni_inconnue_pas_de_ci_dessous():
+    from joi import empreintes
+
+    texte = empreintes.texte_bilan({"voix": [_voix("Bruno", "connue", 600)]})
+    assert "ci-dessous" not in texte and "Bruno" in texte
+
+
+def test_index_signale_ligne_trop_longue_et_journee_pas_regroupee(caplog):
+    _ecrire("index.md", "# Index\n"
+            "- toi.md : la personne\n"
+            f"- projets/x.md : {'un état très détaillé ' * 9}\n"
+            "- journees/2026-11-08.md : une vieille journée\n"
+            "- journees/2026-11-17.md : une journée récente\n"
+            "- journees/ semaine du 2 novembre : regroupée\n")
+    memoire._index_deja_signale = set()
+    with caplog.at_level(logging.WARNING, logger="joi.memoire"):
+        problemes = memoire.verifier_index(date(2026, 11, 20))
+    assert len(problemes) == 2
+    assert any("caractères" in p for p in problemes)
+    assert any("2026-11-08" in p for p in problemes)
+    assert sum("Index de la mémoire" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_index_conforme_rien_a_dire(caplog):
+    _ecrire("index.md", "# Index\n- toi.md : la personne\n- journees/2026-11-19.md : courte\n")
+    with caplog.at_level(logging.WARNING, logger="joi.memoire"):
+        assert memoire.verifier_index(date(2026, 11, 20)) == []
+    assert not caplog.records
+
+
+def test_index_absent_rien_a_dire():
+    assert memoire.verifier_index(date(2026, 11, 20)) == []
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git absent")
+def test_condenser_met_les_faits_deplaces_dans_le_commit(monkeypatch):
+    from types import SimpleNamespace
+
+    memoire.initialiser()
+    _ecrire("journees/2026-11-13.md", "\n".join(f"- {i} : une ligne assez longue pour peser." for i in range(300)))
+
+    class FausseSession:
+        async def send_and_wait(self, message, timeout=None):
+            if "journees/2026-11-13.md\n" in message:
+                memoire.ecrire("journees/2026-11-13.md", "# Condensé\n- l'essentiel\n")
+                texte = ("Voici :\n- déplacé vers projets/principal.md : fin d'exercice au 30 septembre\n"
+                         "- retiré : un dépannage d'imprimante")
+            else:
+                texte = "Rien de déplacé"
+            return SimpleNamespace(data=SimpleNamespace(content=texte))
+
+    @asynccontextmanager
+    async def fausse():
+        yield FausseSession()
+
+    monkeypatch.setattr(memoire, "_bibliothecaire", fausse)
+    asyncio.run(memoire.condenser())
+    corps = memoire._git("log", "-1", "--format=%B").stdout
+    assert corps.startswith("Après la condensation")
+    assert "Faits déplacés ou retirés :" in corps
+    assert "- journees/2026-11-13.md : déplacé vers projets/principal.md : fin d'exercice" in corps
+    assert "- journees/2026-11-13.md : retiré : un dépannage" in corps
+    assert "Rien de déplacé" not in corps
+
+
+def test_faits_deplaces_sans_reponse():
+    assert memoire._faits_deplaces(None) == []
+
+
+def test_consignes_d_une_memoire_juste():
+    from pathlib import Path
+
+    consignes = (Path(memoire.__file__).parent / "bibliothecaire.md").read_text(encoding="utf-8")
+    assert "Une voix inconnue ne devient jamais « tu »" in consignes
+    assert "Un projet ne recopie pas une journée" in consignes
+    assert "300 caractères au plus par puce" in consignes
+    assert "Ne supprime jamais une décision" in memoire.CONSIGNE_CONDENSER
+    assert "faits déplacés ou retirés" in memoire.CONSIGNE_CONDENSER
+
+
+def test_consignes_de_la_bibliothecaire_grandissent_de_1_2_ko_au_plus():
+    """Règle du plan Joi fiable : les consignes de la bibliothécaire (bibliothecaire.md, la consigne de
+    condensation, la consigne d'une écoute) grandissent de 1,2 Ko au plus. Tailles d'avant le plan."""
+    import inspect
+    import re
+    from pathlib import Path
+
+    avant = 6206 + 776 + 302
+    fichier = (Path(memoire.__file__).parent / "bibliothecaire.md").read_bytes()
+    source = inspect.getsource(memoire.consolider_ecoute)
+    bloc = source[source.index('consigne = (f"Le résumé'):source.index("message = (")]
+    ecoute = "".join(re.findall(r'"([^"]*)"', bloc))  # les morceaux de la consigne (sans guillemets droits)
+    apres = len(fichier) + len(memoire.CONSIGNE_CONDENSER.encode()) + len(ecoute.encode())
+    assert apres - avant <= 1200, apres - avant
+
+
+def test_index_redit_seulement_ce_qui_change(caplog):
+    _ecrire("index.md", "# Index\n- journees/2026-11-08.md : vieille\n")
+    memoire._index_deja_signale = set()
+    with caplog.at_level(logging.WARNING, logger="joi.memoire"):
+        memoire.verifier_index(date(2026, 11, 20))
+        memoire.verifier_index(date(2026, 11, 20))
+    assert sum("Index de la mémoire" in r.getMessage() for r in caplog.records) == 1

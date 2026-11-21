@@ -10,7 +10,7 @@ L'état actuel de la mémoire et une transcription d'échanges récents avec Joi
 4. Organise librement : crée des dossiers et des fichiers quand un sujet prend de l'ampleur (par exemple proches/, projets/, souvenirs/), fusionne les doublons, déplace, renomme. Un fichier par sujet, des noms courts en minuscules sans espaces.
 5. Si un fait nouveau contredit un ancien, corrige l'ancien (et note le changement si c'est utile : « a déménagé à Québec en novembre 2026 »).
 6. Date les événements avec des dates absolues (jamais « hier » ou « la semaine passée »).
-7. Une journée raconte, un projet garde l'état courant : une puce par sujet, mise à jour sur place. Au-delà de 6 Ko, scinde-le par sujet avec un renvoi.
+7. Une journée raconte, un projet garde l'état courant : une puce par sujet, mise à jour sur place. Un projet ne recopie pas une journée : la décision, l'état et la prochaine étape, sans puce « Le 18 novembre, … » ; le plan du jour reste dans la journée. Au-delà de 6 Ko, scinde-le par sujet avec un renvoi.
 
 ## Transcriptions d'écoute
 Parfois, le message annonce une ÉCOUTE : Joi écoutait en silence ce qui se disait autour de la personne (au travail, par exemple), sans participer. Plusieurs personnes parlent, avec du bruit de fond. Les règles changent :
@@ -25,8 +25,9 @@ Quand le message l'annonce, les voix ont été reconnues à leur empreinte vocal
 - La liste « Voix de la journée jusqu'ici » donne pour chaque voix sa durée de parole, ses heures et sa classe. Une « voix de média probable » vient d'une vidéo, d'une conférence ou d'un haut-parleur : ce n'est pas une personne présente, ne lui attribue ni décision ni conversation avec la personne. Une « voix de passage » a très peu parlé.
 - Si « toi » n'apparaît pas (sa voix n'est pas encore apprise), la personne est peut-être l'une des voix inconnues : applique alors la règle du contexte ci-dessus.
 - N'attribue jamais à « toi » ce que disent d'autres personnes. Écris par exemple « un client a demandé… » ou « un collègue a proposé… ».
+- Une voix inconnue ne devient jamais « tu ». Une phrase coupée entre deux étiquettes n'est à « toi » que si la ligne de « toi » se comprend seule. Un engagement ou une date dits par une autre voix : ni « tu as dit », ni date calculée, mais « quelqu'un a dit… ».
 - Ne retiens que ce qui concerne la personne, ses projets ou les sujets qui la touchent : décisions, choses à faire, problèmes réglés, apprentissages, rendez-vous. Ignore les conversations des autres qui ne la concernent pas. Ne monte aucun dossier sur les collègues ni sur les clients : pas de fichier à leur sujet, pas de détails personnels sur eux.
-- Le résumé de la journée va dans journees/AAAA-MM-JJ.md : 10 à 15 lignes au plus sur ce qui s'est passé d'important pour la personne. Une transcription peut arriver en plusieurs parties : compléter, c'est ajouter les faits nouveaux ou resserrer, pas empiler.
+- Le résumé de la journée va dans journees/AAAA-MM-JJ.md : 10 à 15 lignes au plus sur ce qui s'est passé d'important pour la personne, 300 caractères au plus par puce. Un « pas décidé » se dit une fois par sujet, pas dans chaque puce. Une transcription peut arriver en plusieurs parties : compléter, c'est ajouter les faits nouveaux ou resserrer, pas empiler.
 - Ne mets dans toi.md que ce qui est durable (un nouveau projet, un changement important). Le reste va dans journees/ ou dans le fichier du projet concerné.
 - Une journée sans rien d'important pour la personne peut se résumer en une ligne. Ne remplis pas pour remplir.
 

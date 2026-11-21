@@ -315,7 +315,9 @@ sur place). Pour resserrer une mémoire écrite avant ces règles, une fois, Joi
 `python -m joi.memoire condenser`. La bibliothécaire reprend les journées de plus de 8 Ko, les autres
 fichiers de plus de 6 Ko, `toi.md` et `index.md`, entre un commit « Avant » et un commit « Après ».
 La commande refuse de partir si Joi tourne ou si l'état d'avant ne peut pas être enregistré, et affiche
-à la fin la commande `git diff` pour relire et la commande `git revert` pour tout annuler.
+à la fin la commande `git diff` pour relire et la commande `git revert` pour tout annuler. Le
+commit « Après » liste les faits que la bibliothécaire dit avoir déplacés ou retirés : une décision,
+une échéance ou un suivi ouvert ne doit jamais disparaître.
 
 Pour repartir à zéro, supprime `donnees/memoire/`,
 `donnees/journal/` et `donnees/enregistrements/`.

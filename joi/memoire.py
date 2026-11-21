@@ -648,6 +648,7 @@ async def consolider() -> None:
             await asyncio.to_thread(
                 _enregistrer_version, f"Consolidation jusqu'à {journal.derniere_consolidation()}"
             )
+            await asyncio.to_thread(verifier_index)
 
 
 # --- Consolidation d'une écoute ---------------------------------------------------------------
@@ -793,7 +794,8 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
                             consigne = (f"Le résumé de cette journée va dans journees/{jour}.md "
                                         "(lis-le d'abord s'il existe, puis complète-le). Si un fait "
                                         "change l'état d'un projet (décision, date, achat, problème "
-                                        "réglé), mets aussi à jour sa ligne dans le fichier du projet ; "
+                                        "réglé), remplace aussi l'état dans sa ligne du fichier du projet, "
+                                        "sans y recopier le récit ; "
                                         "si un fait durable concerne la personne, mets à jour toi.md. ")
                         message = (
                             f"{_etat_memoire()}\n\n"
@@ -815,6 +817,7 @@ async def consolider_ecoute(ecoutes: list[Ecoute]) -> None:
         finally:
             debuts = ", ".join(e.debut[:16].replace("T", " ") for e in ecoutes)
             await asyncio.to_thread(_enregistrer_version, f"Écoute du {debuts}")
+            await asyncio.to_thread(verifier_index)
     if apprises:
         _signaler_apprises(apprises)
         _signaler_ecoutes([e for e in ecoutes if e.debut[:10] in apprises])
@@ -831,10 +834,14 @@ CONSIGNE_CONDENSER = (
     "réécris-le plus court : garde ce qui servira dans un mois (décisions, dates, engagements, "
     "personnes, problèmes réglés et leur solution), retire le dépannage ponctuel, les numéros de "
     "version et les commandes, fusionne ce qui se répète. Ne perds aucun fait durable : s'il a sa "
-    "place ailleurs (le fichier d'un projet, toi.md), mets-le là. N'invente rien. Garde tels quels "
+    "place ailleurs (le fichier d'un projet, toi.md), mets-le là. Ne supprime jamais une décision, une "
+    "échéance à venir, un suivi pas clos, un risque de sécurité pas réglé ni un chiffre de décision "
+    "(parts, dates, montants) : mets-le d'abord dans le projet concerné. N'invente rien. Garde tels quels "
     "l'en-tête et la section « Voix entendues » d'une journée. Corrige ce qui fait de la personne une "
     "tierce personne sous son propre nom. Mets index.md à jour si tu crées, déplaces ou supprimes un "
-    "fichier."
+    "fichier. Au lieu de « Terminé », réponds par la liste des faits déplacés ou retirés, un par "
+    "ligne commençant par « - » (« - déplacé vers projets/x.md : … », « - retiré : … »), ou « Rien "
+    "de déplacé »."
 )
 
 
@@ -886,15 +893,16 @@ async def condenser() -> Condensation:
                       "de la mémoire (git absent, ou dépôt verrouillé : Joi tourne-t-elle ?).")
             return Condensation(None, [], [])
         fichiers = _a_condenser()
-        confies, echecs = [], []
+        confies, echecs, deplaces = [], [], []
         try:
             async with _bibliothecaire() as session:
                 for chemin in fichiers:
                     log.info("Condensation de %s…", chemin)
                     message = f"{_etat_memoire()}\n\nCONDENSER : {chemin}\n{CONSIGNE_CONDENSER}"
                     try:
-                        await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
+                        reponse = await session.send_and_wait(message, timeout=DELAI_CONSOLIDATION)
                         confies.append(chemin)
+                        deplaces += [f"{chemin} : {fait}" for fait in _faits_deplaces(reponse)]
                     except Exception:
                         log.exception("Condensation de %s interrompue", chemin)
                         echecs.append(chemin)
@@ -905,8 +913,64 @@ async def condenser() -> Condensation:
             resume = f"{len(confies)} fichier(s) sur {len(fichiers)}"
             if echecs:
                 resume += f", échec : {', '.join(echecs)}"
-            await asyncio.to_thread(_enregistrer_version, f"Après la condensation ({resume})")
+            message = f"Après la condensation ({resume})"
+            if deplaces:
+                # La personne relit le diff : cette liste lui dit où chercher ce qui a bougé ou disparu.
+                message += "\n\nFaits déplacés ou retirés :\n" + "\n".join(f"- {f}" for f in deplaces)
+            await asyncio.to_thread(_enregistrer_version, message)
     return Condensation(avant, confies, echecs)
+
+
+INDEX_LIGNE_MAX = 150  # caractères : la règle de bibliothecaire.md pour une ligne de l'index
+INDEX_JOURNEE_JOURS = 7  # au-delà, une journée se regroupe par semaine dans l'index
+_index_deja_signale: set[str] = set()
+
+
+def verifier_index(aujourdhui: date | None = None) -> list[str]:
+    """Ce qui, dans index.md, ne suit pas les consignes (ligne trop longue, journée de plus d'une
+    semaine pas regroupée). Le code ne corrige rien et ne rappelle pas le modèle : il le dit au
+    journal, et la prochaine révision des données le verra."""
+    fichier = RACINE / "index.md"
+    if not fichier.exists():
+        return []
+    aujourdhui = aujourdhui or date.today()
+    try:
+        contenu = fichier.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:  # une vérification ne casse jamais la consolidation
+        log.warning("Index de la mémoire illisible : %s", e)
+        return []
+    problemes = []
+    for ligne in contenu.splitlines():
+        ligne = ligne.strip()
+        if not ligne.startswith("-"):
+            continue
+        if len(ligne) > INDEX_LIGNE_MAX:
+            problemes.append(f"ligne de {len(ligne)} caractères : {ligne[:60]}…")
+        # Une ligne pour une seule journée (« - journees/AAAA-MM-JJ.md : … ») ; une semaine regroupée,
+        # elle, ne commence pas ainsi.
+        m = re.match(r"-\s*journees/(\d{4}-\d\d-\d\d)\.md\s*:", ligne)
+        if m:
+            try:
+                jour = date.fromisoformat(m.group(1))
+            except ValueError:
+                continue
+            if (aujourdhui - jour).days > INDEX_JOURNEE_JOURS:
+                problemes.append(f"journée du {m.group(1)} pas regroupée par semaine")
+    # Une écoute se consolide plusieurs fois par séance : on ne redit que ce qui a changé.
+    global _index_deja_signale
+    if set(problemes) != _index_deja_signale:
+        for probleme in problemes:
+            log.warning("Index de la mémoire : %s", probleme)
+        _index_deja_signale = set(problemes)
+    return problemes
+
+
+def _faits_deplaces(reponse) -> list[str]:
+    """Les lignes « - … » de la réponse de la bibliothécaire (l'événement final de send_and_wait) :
+    les faits qu'elle dit avoir déplacés ou retirés. Rien si elle n'a rien listé."""
+    texte = getattr(getattr(reponse, "data", None), "content", None) or ""
+    faits = [ligne.strip()[1:].strip() for ligne in texte.splitlines() if ligne.strip().startswith("-")]
+    return [f[:300] for f in faits if f][:40]
 
 
 def _joi_en_marche() -> bool:
@@ -940,6 +1004,7 @@ def main(arguments: list[str] | None = None) -> int:
     print(f"{len(resultat.confies)} fichier(s) condensé(s)"
           + (f", {len(resultat.echecs)} en échec : {', '.join(resultat.echecs)}" if resultat.echecs else "")
           + f'.\nPour relire : git -C "{RACINE}" diff {resultat.avant[:10]}'
+          + f'\nFaits déplacés ou retirés, selon la bibliothécaire : git -C "{RACINE}" log -1'
           + f'\nPour tout annuler : git -C "{RACINE}" revert --no-edit {resultat.avant[:10]}..HEAD')
     return 0 if not resultat.echecs else 1
 

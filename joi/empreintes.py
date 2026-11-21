@@ -937,19 +937,24 @@ def texte_bilan(bilan: dict) -> str:
     if toi:
         lignes.append(f"- Toi : {_duree(toi['duree_s'])} de parole reconnue ({_plages(toi)}).")
     else:
-        lignes.append("- Toi : voix pas reconnue (empreinte pas encore apprise) ; tu es sans doute "
-                      "l'un des interlocuteurs ci-dessous.")
+        lignes.append("- Toi : voix pas reconnue (empreinte pas encore apprise)"
+                      + (" ; tu es sans doute l'une des voix inconnues ci-dessous." if interlocuteurs or passages
+                         else "."))
     for v in par_classe["connue"]:
         if v is not toi:
             lignes.append(f"- {v['nom']} : {_duree(v['duree_s'])} ({_plages(v)}).")
-    for v in interlocuteurs:
-        lignes.append(f"- {v['nom'].capitalize()} : {_duree(v['duree_s'])} ({_plages(v)}).")
     if medias:
         lignes.append("- Voix de média probables (vidéo, conférence, haut-parleur) : "
                       + "; ".join(f"{v['nom']}, {_duree(v['duree_s'])} ({_plages(v, 2)})" for v in medias) + ".")
-    if passages:
-        lignes.append(f"- {len(passages)} voix de passage (moins de {config.JOI_VOIX_INTERLOCUTEUR_S:.0f} s "
-                      "chacune).")
+    # Les voix inconnues tiennent en une ligne : une par voix pesait le quart du résumé de la journée,
+    # pour des voix dont l'empreinte est effacée le soir même. Le détail reste dans voix-journee.json.
+    inconnues = interlocuteurs + passages
+    if inconnues:
+        total = sum(v["duree_s"] for v in inconnues)
+        ligne = f"- {len(inconnues)} voix inconnue{'s' if len(inconnues) > 1 else ''}, {_duree(total)} en tout"
+        if passages:
+            ligne += f", dont {len(passages)} de passage (moins de {config.JOI_VOIX_INTERLOCUTEUR_S:.0f} s chacune)"
+        lignes.append(ligne + ".")
     lignes += ["", "_Reconnaissance locale des voix ; les empreintes anonymes de la journée sont effacées._"]
     return "\n".join(lignes)
 
