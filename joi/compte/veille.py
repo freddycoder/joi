@@ -70,6 +70,9 @@ class Veille:
         self._deconnexion_confirmee = False  # un contexte « déconnecté » a été gardé (donc dit)
         self._coupure_a_dire: tuple[datetime, datetime] | None = None  # une coupure finie, à dire une fois
         self._deconnexion_dite_le: str | None = None  # le jour où Joi a déjà dit qu'elle est déconnectée
+        # Ce que le dernier réveil a confié à Joi, noté par noter_dites() une fois la session créée :
+        # un réveil raté ne doit pas faire perdre l'annonce du jour.
+        self._a_noter: dict | None = None
         self._etat = {
             "connecte": None,
             "adresse": None,
@@ -168,12 +171,14 @@ class Veille:
 
     def _a_dire(self, contexte: _Contexte) -> list[str]:
         """Ce que Joi dit d'elle-même sur son compte, une fois : une déconnexion (le premier réveil du
-        jour), une coupure finie (au réveil qui suit). Le code tient le « une fois », pas le modèle."""
+        jour), une coupure finie (au réveil qui suit). Le code tient le « une fois », pas le modèle :
+        c'est noté par noter_dites(), une fois la session créée."""
         lignes = []
+        self._a_noter = None
         aujourdhui = maintenant().date().isoformat()
         if contexte.deconnecte:
             if self._deconnexion_dite_le != aujourdhui:
-                self._deconnexion_dite_le = aujourdhui
+                self._a_noter = {"deconnexion": aujourdhui}
                 lignes.append("Dis-le à la personne dès ta première réplique, en une phrase (« mon compte "
                               "est déconnecté, il faudra relancer la connexion »), puis n'y reviens que si "
                               "elle t'en parle.")
@@ -181,13 +186,26 @@ class Veille:
                 lignes.append("Si la personne te parle de tes courriels ou de l'agenda, dis-le-lui simplement.")
         elif self._coupure_a_dire:
             debut, fin = self._coupure_a_dire
-            self._coupure_a_dire = None
-            if debut.date() == maintenant().date():  # une coupure d'un autre jour ne sert plus à rien
+            if debut.date() != maintenant().date():  # une coupure d'un autre jour ne sert plus à rien
+                self._coupure_a_dire = None
+            else:
+                self._a_noter = {"coupure": self._coupure_a_dire}
                 lignes.append(f"Ton compte a été coupé de {debut:%H:%M} à {fin:%H:%M}. Dis-le en une phrase "
                               "au début de la conversation.")
         return lignes
 
+    def noter_dites(self) -> None:
+        """Le dernier réveil est devenu une vraie session : ce qu'il annonçait ne reviendra pas."""
+        a_noter, self._a_noter = self._a_noter, None
+        if not a_noter:
+            return
+        if "deconnexion" in a_noter:
+            self._deconnexion_dite_le = a_noter["deconnexion"]
+        elif self._coupure_a_dire == a_noter.get("coupure"):
+            self._coupure_a_dire = None
+
     async def contexte_reveil(self) -> str:
+        self._a_noter = None  # rien d'un réveil précédent : seul ce réveil-ci peut être noté
         cache = self._cache_valable()
         if cache is not None:
             log.info("Contexte du compte servi depuis celui de %s ; rafraîchi en fond.", f"{cache.quand:%H:%M}")
@@ -204,8 +222,10 @@ class Veille:
             log.exception("Contexte du compte impossible au réveil")
             return ""
         servi = self._garder(contexte)
+        # Un contexte d'avant (il dit son heure), pas la phrase neutre d'une coupure qui commence.
+        depuis_cache = servi is not contexte and servi is self._cache
         await self._noter_montrees(servi)
-        return self._texte(servi, depuis_cache=servi is not contexte)
+        return self._texte(servi, depuis_cache=depuis_cache)
 
     @staticmethod
     async def _noter_montrees(contexte: _Contexte) -> None:
@@ -239,13 +259,19 @@ class Veille:
                             "rafraîchissement.", f"{contexte.quand:%H:%M}")
                 return _Contexte(["Ton compte ne répond pas pour l'instant."], contexte.quand, complet=False)
             self._deconnexion_confirmee = True
-        else:
+        elif contexte.complet or self._coupure_debut is None:
             if self._deconnexion_confirmee and self._coupure_debut:
                 self._coupure_a_dire = (self._coupure_debut, contexte.quand)
                 log.info("Compte de nouveau joignable, après une coupure depuis %s.",
                          f"{self._coupure_debut:%H:%M}")
             self._deconnexion_confirmee = False
             self._coupure_debut = None
+        elif self._deconnexion_confirmee and ancien is not None and ancien.deconnecte:
+            # Une erreur passagère pendant une déconnexion ne dit pas que le compte est revenu : la
+            # déconnexion reste, et elle reste dite.
+            log.warning("Contexte du compte pas rafraîchi (%s) pendant la déconnexion.",
+                        self._etat.get("derniere_erreur") or "erreur")
+            return ancien
         if not contexte.complet and not contexte.deconnecte and ancien is not None and ancien.complet:
             log.warning("Contexte du compte pas rafraîchi (%s) : je garde celui de %s.",
                         self._etat.get("derniere_erreur") or "erreur", f"{ancien.quand:%H:%M}")

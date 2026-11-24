@@ -93,6 +93,10 @@ class Integration:
     async def contexte_reveil(self) -> str:
         return await veille.instance().contexte_reveil()
 
+    def noter_dites(self) -> None:
+        """La session est créée : ce que le réveil annonçait (déconnexion, coupure finie) est dit."""
+        veille.instance().noter_dites()
+
     def noter_tour(self, texte: str) -> None:
         self.confirmation.noter_tour(texte)
 

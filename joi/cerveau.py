@@ -183,6 +183,8 @@ class Cerveau:
             self._client = await client_partage(neuf=True)
             self._session = await nouvelle_session(self._client)
         self._session.on(self._sur_evenement)
+        if self._compte:
+            self._compte.noter_dites()
         if self._noter_echeances:
             # La consigne « parle d'une échéance » est maintenant dans une vraie session : une fois par jour.
             memoire.noter_echeances_dites()

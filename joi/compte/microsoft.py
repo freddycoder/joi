@@ -192,7 +192,8 @@ class Microsoft:
         # et le cache MSAL sont sûrs entre fils, mais pas la création paresseuse de l'application ni deux
         # rafraîchissements du même jeton en même temps.
         self._verrou_jeton = threading.Lock()
-        self._dernier_echec: tuple[float, str] | None = None  # (time.monotonic(), raison)
+        # (time.monotonic(), raison, déconnecté) : déconnecté faux pour une coupure du réseau
+        self._dernier_echec: tuple[float, str, bool] | None = None
 
     # --- Connexion ----------------------------------------------------------------------------
 
@@ -229,7 +230,8 @@ class Microsoft:
         déconnexion. On garde donc la vraie raison, et on réessaie une fois, sauf sur un refus net."""
         with self._verrou_jeton:
             if self._dernier_echec and time.monotonic() - self._dernier_echec[0] < ECHEC_RETENU_S:
-                raise CompteDeconnecte(self._dernier_echec[1])
+                _, raison, deconnecte = self._dernier_echec
+                raise CompteDeconnecte(raison) if deconnecte else ErreurCompte(raison)
             compte = self._compte()
             if not compte:
                 raise CompteDeconnecte("aucune connexion enregistrée")
@@ -244,7 +246,9 @@ class Microsoft:
                     if essai == 0:
                         time.sleep(PAUSE_AVANT_REESSAI)
                         continue
-                    raise ErreurCompte("Microsoft ne répond pas (rafraîchissement du jeton)") from e
+                    raison = "Microsoft ne répond pas (rafraîchissement du jeton)"
+                    self._dernier_echec = (time.monotonic(), raison, False)
+                    raise ErreurCompte(raison) from e
                 if resultat and "access_token" in resultat:
                     self._dernier_echec = None
                     return resultat["access_token"]
@@ -257,7 +261,7 @@ class Microsoft:
                 if essai == 0:
                     time.sleep(PAUSE_AVANT_REESSAI)
             raison = erreur if erreur != "aucun jeton dans le cache" else "jeton expiré"
-            self._dernier_echec = (time.monotonic(), raison)
+            self._dernier_echec = (time.monotonic(), raison, True)
         raise CompteDeconnecte(raison)
 
     def connecter(self, afficher: Callable[[str], None] = print, par_code: bool = False) -> str:

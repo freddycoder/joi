@@ -479,6 +479,7 @@ async def reconsolider_journee(jour: str) -> None:
             segments=segments_ecoute,
             voix_reconnues=True,
             legende_voix=legende,
+            trous=trous_a_dire(manifeste),
             correction=True,
         ))
     await memoire.consolider_ecoute(ecoutes)

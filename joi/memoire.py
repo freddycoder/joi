@@ -34,6 +34,7 @@ from copilot import CopilotClient, define_tool
 from copilot.generated.rpc import PermissionDecisionReject
 
 from . import config, journal
+from .ecrit import date_ecrite, externe
 
 log = logging.getLogger("joi.memoire")
 
@@ -271,9 +272,7 @@ def echeances_a_venir(aujourdhui: date) -> list[Echeance]:
 
 
 def _jour_dit(jour: date, aujourdhui: date) -> str:
-    from .compte.modele import _date_ecrite
-
-    ecrit = _date_ecrite(jour, annee=jour.year != aujourdhui.year)
+    ecrit = date_ecrite(jour, annee=jour.year != aujourdhui.year)
     return {0: "aujourd'hui", 1: f"demain, {ecrit}"}.get((jour - aujourdhui).days, ecrit)
 
 
@@ -315,8 +314,6 @@ def _a_venir(aujourdhui: date) -> str:
     echeances = echeances_a_venir(aujourdhui)
     if not echeances:
         return ""
-    from .compte.modele import externe
-
     lignes = "\n".join(f"- {_jour_dit(e.jour, aujourdhui)}{', ' + e.heure if e.heure else ''} : {e.quoi}"
                        for e in echeances)
     texte = f"\n## À venir (les {ECHEANCES_JOURS} prochains jours, d'après ta mémoire)\n{externe(lignes)}\n"

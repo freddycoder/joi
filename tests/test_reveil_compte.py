@@ -217,7 +217,9 @@ def test_deconnexion_dite_une_fois_par_jour(faux):
         v = veille.Veille(faux)
         faux.panne = CompteDeconnecte("jeton expiré")
         v._coupure_debut = maintenant() - veille.DUREE_AVANT_DECONNEXION  # les échecs durent déjà
-        textes = [await v.contexte_reveil(), await v.contexte_reveil()]
+        textes = [await v.contexte_reveil()]
+        v.noter_dites()  # la session est créée
+        textes.append(await v.contexte_reveil())
         v._deconnexion_dite_le = "2000-01-01"  # un autre jour
         textes.append(await v.contexte_reveil())
         return textes
@@ -243,6 +245,7 @@ def test_la_reconnexion_dit_les_heures_de_la_coupure(faux):
         faux.panne = None
         await v.rafraichir()
         apres = await v.contexte_reveil()
+        v.noter_dites()
         encore = await v.contexte_reveil()
         return debut, apres, encore
 
@@ -440,3 +443,62 @@ def test_contexte_de_20_min_servi_sans_attente(faux):
     texte, duree = asyncio.run(scenario())
     assert duree < PAUSE / 2
     assert "## Ton compte (vu à" in texte
+
+
+def test_une_annonce_d_un_reveil_rate_revient(faux):
+    """La déconnexion n'est notée « dite » qu'une fois la session créée (noter_dites)."""
+    async def scenario():
+        v = veille.Veille(faux)
+        faux.panne = CompteDeconnecte("jeton expiré")
+        v._coupure_debut = maintenant() - veille.DUREE_AVANT_DECONNEXION
+        rate = await v.contexte_reveil()  # la session n'a pas pu être créée : pas de noter_dites()
+        return rate, await v.contexte_reveil()
+
+    rate, suivant = asyncio.run(scenario())
+    assert "dès ta première réplique" in rate
+    assert "dès ta première réplique" in suivant
+
+
+def test_une_erreur_passagere_pendant_une_deconnexion_n_est_pas_un_retour(faux):
+    async def scenario():
+        v = veille.Veille(faux)
+        await v.preparer()
+        faux.panne = CompteDeconnecte("jeton expiré")
+        await v.rafraichir()
+        v._coupure_debut -= veille.DUREE_AVANT_DECONNEXION
+        debut = v._coupure_debut
+        await v.rafraichir()
+        faux.panne = ErreurCompte("Microsoft ne répond pas")
+        await v.rafraichir()
+        etat = (v._deconnexion_confirmee, v._coupure_debut, v._coupure_a_dire)
+        faux.panne = CompteDeconnecte("jeton expiré")
+        return debut, etat, await v.contexte_reveil()
+
+    debut, (confirmee, coupure_debut, a_dire), texte = asyncio.run(scenario())
+    assert confirmee and coupure_debut == debut and a_dire is None
+    assert "coupé de" not in texte and "ne fonctionne pas pour l'instant" in texte
+
+
+def test_la_phrase_neutre_d_une_coupure_n_a_pas_l_en_tete_du_cache(faux):
+    faux.panne = CompteDeconnecte("jeton expiré")
+    texte = asyncio.run(veille.Veille(faux).contexte_reveil())
+    assert "ne répond pas pour l'instant" in texte
+    assert "## Ton compte (au réveil)" in texte and "(vu à" not in texte
+
+
+def test_jeton_une_coupure_du_reseau_vaut_pour_les_autres_fils(monkeypatch):
+    """Une erreur réseau du rafraîchissement est retenue comme un refus : un seul fil fait les essais."""
+    from joi.compte import microsoft
+
+    class AppSansReseau(FausseAppMsal):
+        def acquire_token_silent_with_error(self, portees, account=None, force_refresh=False):
+            self.appels += 1
+            raise ConnectionError("pas de réseau")
+
+    app = AppSansReseau([])
+    m = _microsoft(app, monkeypatch)
+    for _ in range(3):
+        with pytest.raises(ErreurCompte, match="ne répond pas") as e:
+            m._jeton()
+        assert not isinstance(e.value, CompteDeconnecte)
+    assert app.appels == 2
