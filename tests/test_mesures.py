@@ -2,6 +2,7 @@
 (pas depuis les étiquettes de segment), le modèle dans la ligne « Latence », le coût de transcription
 du jour."""
 
+import asyncio
 import importlib.util
 import json
 import logging
@@ -193,3 +194,106 @@ def test_cout_du_jour_estime_un_segment_sans_cout():
     (dossier / "seance-080000.json").write_text(json.dumps(manifeste), encoding="utf-8")
     assert transcription.cout_du_jour("2026-11-18") == pytest.approx(transcription._facture({}, manifeste["segments"][0])[1])
     assert transcription.cout_du_jour("2026-11-18") > 0
+
+
+# --- Plan Joi fiable, partie 4 : des mesures exactes ------------------------------------------------
+
+def test_usage_du_sdk_dans_la_ligne_latence():
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from copilot.session_events import SessionEventType as T
+
+    from joi import cerveau
+
+    c = cerveau.Cerveau(modele=None, avec_compte=False)
+    c.usage = {}
+    c._file = asyncio.Queue()  # un tour en cours
+    for donnees in (SimpleNamespace(model="gpt-essai", response_model="gpt-essai-2026", input_tokens=7000,
+                                    output_tokens=40, reasoning_tokens=300, cache_read_tokens=None,
+                                    time_to_first_token=timedelta(seconds=4.2), reasoning_effort="medium"),
+                    SimpleNamespace(model="gpt-essai", response_model=None, input_tokens=7100, output_tokens=30,
+                                    reasoning_tokens=None, cache_read_tokens=5000,
+                                    time_to_first_token=timedelta(seconds=1.0), reasoning_effort=None)):
+        c._traiter_evenement(SimpleNamespace(type=T.ASSISTANT_USAGE, data=donnees))
+    assert c.usage["modele"] == "gpt-essai"  # le dernier appel
+    assert c.usage["entree"] == 14100 and c.usage["sortie"] == 70 and c.usage["reflexion"] == 300
+    assert c.usage["appels"] == 2 and c.usage["premier_jeton_s"] == 4.2
+
+    maintenant = time.monotonic()
+    mesure = serveur.MesureReponse(Tour("Salut.", True, 0, [], recu=maintenant, fin_parole=maintenant - 0.2))
+    mesure.envoi = maintenant
+    mesure.usage = dict(c.usage)
+    ligne = mesure.ligne()
+    assert "modèle défaut (gpt-essai, medium)" in ligne
+    assert "jetons entrée 14100, sortie 70, réflexion 300, appels 2" in ligne
+    assert mesure.resume()["jetons"]["entree"] == 14100
+
+
+def test_usage_hors_d_un_tour_ignore():
+    from types import SimpleNamespace
+
+    from copilot.session_events import SessionEventType as T
+
+    from joi import cerveau
+
+    c = cerveau.Cerveau(modele=None, avec_compte=False)
+    c.usage = {}
+    c._traiter_evenement(SimpleNamespace(type=T.ASSISTANT_USAGE, data=SimpleNamespace(model="m", input_tokens=5)))
+    assert c.usage == {}
+
+
+def test_effort_dit_meme_si_le_modele_est_celui_demande():
+    maintenant = time.monotonic()
+    mesure = serveur.MesureReponse(Tour("Salut.", True, 0, [], recu=maintenant), modele="gpt-x")
+    mesure.usage = {"modele": "gpt-x", "effort": "low"}
+    assert "modèle gpt-x (low)" in mesure.ligne()
+
+
+def test_ligne_latence_sans_usage_reste_comme_avant():
+    maintenant = time.monotonic()
+    mesure = serveur.MesureReponse(Tour("Salut.", True, 0, [], recu=maintenant), modele="modele-essai")
+    ligne = mesure.ligne()
+    assert ligne.endswith("modèle modele-essai") and "jetons" not in ligne
+
+
+def test_extraire_modele_jetons_et_reveils_sans_suite(extraire):
+    lignes = [
+        "2026-11-22 07:30:00 INFO joi.serveur Latence : fin de tour 0.1 s · cerveau : 1er mot 4.0 s, 1re phrase "
+        "4.0 s · synthèse 0.3 s · lecture 0.0 s · total 4.5 s (fin de parole → premier son) · modèle défaut "
+        "(gpt-essai) · jetons entrée 7000, sortie 40, réflexion 300, appels 1",
+        "2026-11-22 07:31:00 INFO joi.serveur Latence : fin de tour 0.1 s · cerveau : 1er mot 2.0 s, 1re phrase "
+        "2.0 s · synthèse 0.3 s · lecture 0.0 s · total 2.5 s (fin de parole → premier son) · modèle défaut "
+        "(gpt-essai) · jetons entrée 9000, sortie 60, appels 1 · 1 recherche(s)",
+        "2026-11-22 07:32:00 INFO joi.serveur Latence : fin de tour 0.1 s · total 2.5 s (fin de parole → premier "
+        "son) · modèle défaut",
+    ]
+    assert extraire.modeles_du_jour(lignes) == "défaut (gpt-essai) ×2, défaut ×1"
+    assert extraire.jetons_du_jour(lignes) == "8000 / 50 / 150"
+    assert extraire.jetons_du_jour([]) == "—"
+    assert extraire.RE_REVEIL_SANS_SUITE.search(
+        "Retour en écoute (bouton) : conversation ouverte par « Joi, reviens », 0 tour(s) de la personne.")
+    assert not extraire.RE_REVEIL_SANS_SUITE.search(
+        "Retour en écoute (bouton) : conversation ouverte par « Joi, reviens », 3 tour(s) de la personne.")
+
+
+def test_ligne_ecoute_transcrite_dit_le_modele_facture(monkeypatch, caplog):
+    import asyncio
+
+    dossier = config.DOSSIER_ENREGISTREMENTS / "2026-11-22"
+    dossier.mkdir(parents=True, exist_ok=True)
+    manifeste = {"debut": "2026-11-22T09:00:00", "fin": "2026-11-22T09:30:00",
+                 "segments": [{"fichier": "2026-11-22/a.mp3", "debut": "2026-11-22T09:00:00", "etat": "enregistre",
+                               "duree_s": 1800}]}
+    (dossier / "seance-090000.json").write_text(json.dumps(manifeste), encoding="utf-8")
+
+    async def faux_segment(client, chemin, manifeste, segment):
+        segment.update(etat="transcrit", modele="universal-essai", cout=0.11)
+        return 1800.0, 0.11
+
+    monkeypatch.setattr(config, "ASSEMBLYAI_API_KEY", "cle-de-test")
+    monkeypatch.setattr(transcription, "_transcrire_segment", faux_segment)
+    with caplog.at_level(logging.INFO, logger="joi.transcription"):
+        asyncio.run(transcription.transcrire_en_attente())
+    ligne = next(r.getMessage() for r in caplog.records if "Écoute transcrite" in r.getMessage())
+    assert ligne.endswith(", modèle universal-essai")

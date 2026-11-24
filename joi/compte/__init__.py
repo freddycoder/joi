@@ -18,3 +18,10 @@ OUTILS_LECTURE = ("courriels_recents", "lire_courriel", "chercher_courriels", "p
 OUTILS_ECRITURE = ("envoyer_courriel", "creer_evenement", "modifier_evenement", "annuler_evenement",
                    "ajouter_tache", "terminer_tache", "marquer_proposition")
 OUTILS = OUTILS_LECTURE + OUTILS_ECRITURE
+
+
+def est_echeance(source) -> bool:
+    """Un événement né d'une échéance de « À venir » (paramètre source de creer_evenement) : créé
+    seulement sur un oui, sans invité (plan Joi fiable, partie 5). Ici pour le serveur MCP et pour la
+    permission, sans que le serveur de Joi importe le serveur MCP."""
+    return isinstance(source, str) and source.strip().lower() in ("echeance", "échéance")

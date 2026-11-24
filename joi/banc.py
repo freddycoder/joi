@@ -44,7 +44,7 @@ def _centile(valeurs: list[float], p: float) -> float | None:
 
 async def mesurer(modele: str | None, phrases: list[str]) -> dict:
     """Réveille un cerveau avec ce modèle et lui envoie les phrases une à une."""
-    cerveau = Cerveau(modele=modele, avec_compte=False)
+    cerveau = Cerveau(modele=modele, avec_compte=False, noter_echeances=False)  # lecture seule
     debut = time.perf_counter()
     await cerveau.demarrer()
     reveil = time.perf_counter() - debut

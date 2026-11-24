@@ -144,3 +144,42 @@ def test_journee_pas_terminee_pendant_une_ecoute():
     del enregistreur._seances_actives[chemin]
     vivant["segments"][-1]["etat"] = "consolide"  # le manifeste vivant n'est plus sur le disque…
     assert not transcription._journee_terminee("2026-11-16")  # … celui du disque a encore « en_cours »
+
+
+# --- Plan Joi fiable, partie 3 : les trous d'écoute ----------------------------------------------
+
+def test_trou_dans_le_manifeste_et_la_ligne_de_fin(dossier, caplog):
+    import logging
+    from datetime import datetime, timedelta
+
+    e = Enregistreur(dossier=dossier, duree_segment_s=60.0)
+    e.ouvrir()
+    debut = datetime.fromisoformat(e.manifeste["debut"])
+    e.manifeste["debut"] = (debut - timedelta(minutes=187)).isoformat(timespec="seconds")
+    e.ouvrir_trou(datetime(2026, 11, 20, 13, 10, 22))
+    e.ouvrir_trou(datetime(2026, 11, 20, 13, 11, 0))  # déjà ouvert : rien ne change
+    assert len(e.manifeste["trous"]) == 1
+    assert e.fermer_trou(datetime(2026, 11, 20, 14, 46, 3)) == (datetime(2026, 11, 20, 13, 10, 22),
+                                                                 datetime(2026, 11, 20, 14, 46, 3))
+    assert e.fermer_trou(datetime(2026, 11, 20, 14, 50)) is None  # rien d'ouvert
+    e.ouvrir_trou(datetime.now() - timedelta(seconds=40))  # un trou encore ouvert à la fin
+    with caplog.at_level(logging.INFO, logger="joi.enregistreur"):
+        e.fermer()
+    trous = e.manifeste["trous"]
+    assert trous[0]["duree_s"] == 5741 and trous[1]["fin"] is not None
+    ligne = next(r.getMessage() for r in caplog.records if "Écoute terminée" in r.getMessage())
+    assert "sur 187 min de séance" in ligne and "96 min sans audio" in ligne and "13:10 → 14:46" in ligne
+    relu = json.loads(next(dossier.glob("*/seance-*.json")).read_text(encoding="utf-8"))
+    assert relu["trous"][0]["fin"] == "2026-11-20T14:46:03"
+    assert transcription.trous_a_dire(relu) == [("13:10", "14:46")]  # le trou de 40 s n'est pas dit
+
+
+def test_ligne_de_fin_sans_trou(dossier, caplog):
+    import logging
+
+    e = Enregistreur(dossier=dossier, duree_segment_s=1.0)
+    e.ouvrir()
+    with caplog.at_level(logging.INFO, logger="joi.enregistreur"):
+        e.fermer()
+    ligne = next(r.getMessage() for r in caplog.records if "Écoute terminée" in r.getMessage())
+    assert "min de séance" in ligne and "sans audio" not in ligne

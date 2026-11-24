@@ -38,6 +38,7 @@ Tout ce qui échoue (réseau, Copilot, arrêt de Joi) est repris au prochain app
 """
 
 import asyncio
+from collections import Counter
 import json
 import logging
 import time
@@ -124,9 +125,11 @@ async def transcrire_en_attente() -> None:
     monitoring.transcription["cout"] += cout
     monitoring.transcription["segments"] += reussis
     monitoring.transcription["derniere"] = datetime.now().isoformat(timespec="seconds")
+    modeles = Counter(segment["modele"] for _, _, segment in a_faire if segment.get("modele"))
     log.info(
-        "Écoute transcrite : %d segment(s) sur %d, %.2f h d'audio facturées, environ %.2f $ US (%.0f s)",
+        "Écoute transcrite : %d segment(s) sur %d, %.2f h d'audio facturées, environ %.2f $ US (%.0f s)%s",
         reussis, len(a_faire), secondes / 3600, cout, time.perf_counter() - debut,
+        f", modèle {modeles.most_common(1)[0][0]}" if modeles else "",
     )
     noter_cout_des_jours({segment["debut"][:10] for _, _, segment in a_faire if segment.get("debut")})
 
@@ -184,6 +187,8 @@ async def _transcrire_segment(
             await _effacer_chez_assemblyai(client, resultat.get("id"))
             facture = _facture(resultat, segment)
             segment["cout"] = round(facture[1], 4)  # enregistré avec le manifeste, pour le coût du jour
+            # Le modèle facturé, tel qu'AssemblyAI le dit : la preuve que le modèle voulu sert vraiment.
+            segment["modele"] = resultat.get("speech_model_used") or "inconnu"
 
         voix = await _reconnaitre_voix(mp3, segment, resultat)
         entrees = entrees_du_segment(segment, resultat, voix)
@@ -378,6 +383,7 @@ async def consolider() -> None:
             deja_en_partie=any(s.get("etat") == "consolide" for s in manifeste["segments"]),
             voix_reconnues=voix_reconnues,
             legende_voix=legende,
+            trous=trous_a_dire(manifeste),
         ))
     if ecoutes:
         await memoire.consolider_ecoute(ecoutes)
@@ -473,9 +479,16 @@ async def reconsolider_journee(jour: str) -> None:
             segments=segments_ecoute,
             voix_reconnues=True,
             legende_voix=legende,
+            trous=trous_a_dire(manifeste),
             correction=True,
         ))
     await memoire.consolider_ecoute(ecoutes)
+
+
+def trous_a_dire(manifeste: dict, minimum_s: float = enregistreur.TROU_A_DIRE_S) -> list[tuple[str, str]]:
+    """Les plages sans audio d'une séance (garde-fou du serveur), d'au moins `minimum_s`, en « HH:MM »."""
+    return [(t["debut"][11:16], t["fin"][11:16]) for t in manifeste.get("trous") or []
+            if t.get("fin") and (t.get("duree_s") or 0) >= minimum_s]
 
 
 def _journee_terminee(jour: str) -> bool:
