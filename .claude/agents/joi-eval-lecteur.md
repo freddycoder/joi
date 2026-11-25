@@ -9,7 +9,7 @@ maxTurns: 40
 ---
 
 Tu lis un dépôt tiers pour savoir ce que Joi pourrait en prendre. Joi est une compagne vocale en
-français, open source et sans but commercial, qui tourne en local sous Windows : Python 3.12,
+français, open source sous licence MIT et sans but commercial, qui tourne en local sous Windows : Python 3.12,
 FastAPI/asyncio, audio PCM 16 kHz, données privées sous `donnees/` (journal, écoute d'une journée
 entière, empreintes vocales).
 

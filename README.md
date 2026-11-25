@@ -354,3 +354,11 @@ Pour repartir à zéro, supprime `donnees/memoire/`,
 Les tests n'utilisent **jamais** `donnees/` : `tests/conftest.py` fait pointer `JOI_DONNEES` vers un
 dossier temporaire avant d'importer Joi, et arrête tout si ce n'est pas le cas. Ils ne font aucun appel
 réseau (pas de clé AssemblyAI, pas de compte) et ne chargent ni PyTorch ni Vosk : quelques secondes.
+
+## Licence
+
+Le code de Joi est sous licence MIT : voir [LICENSE](LICENSE).
+
+Les dépendances gardent leurs propres licences ; `edge-tts` et `lameenc` sont sous LGPL-3.0 et
+s'installent telles quelles par `pip`. Le nom et le personnage de Joi viennent de *Blade Runner 2049* :
+la licence couvre le code, pas eux.

@@ -145,20 +145,25 @@ Une ligne suffit quand un axe n'a rien à dire ; un axe absent rend le rapport i
 | **F. Vitalité et confiance** | Dernier commit, versions, issues, auteurs, tests présents, paquet publié par qui. Les étoiles ne sont pas une preuve de qualité : le dire. | étape 3 |
 | **G. Effort et place** | Ordre de grandeur (petit / moyen / gros) pour l'intégrer, face aux plans en cours (`docs/plan-*.md`, « Reste à coder »). Un rang, pas un chiffrage. | inventaire + toi |
 
-**Ce que la licence impose**, selon la forme de réutilisation :
+**Ce que la licence impose.** Joi est sous licence MIT (`LICENSE`) : tout ce qui entre dans le
+dépôt doit pouvoir y rester sous MIT, et quiconque reprend Joi doit pouvoir le faire aussi. Selon la
+forme de réutilisation :
 
-- MIT, BSD, Apache-2.0, ISC : tout est permis ; copier un fichier oblige à garder son avis de licence
-  (et le `NOTICE` pour Apache).
-- GPL, LGPL, AGPL, MPL : une dépendance non modifiée est en général possible ; **copier** du code GPL
-  ou AGPL fait passer Joi sous cette licence ; MPL : le fichier copié reste MPL. Le dire, ne pas
-  trancher le droit : c'est la décision de l'utilisateur.
-- Non commerciale (CC BY-NC, « research only ») : compatible avec l'usage de Joi, mais un morceau copié
-  ne se redistribue pas sous une licence plus ouverte, et ça fermerait la porte à un usage commercial
-  futur. Le dire.
+- **MIT, BSD, ISC, zlib, Apache-2.0** : compatibles. Une dépendance : rien à faire. Un fichier copié :
+  garder son avis de copyright et de licence en tête du fichier ; pour Apache-2.0, reprendre aussi son
+  `NOTICE` et dire dans le fichier qu'il a été modifié.
+- **LGPL** : une dépendance installée par `pip` sans modification est compatible (c'est déjà le cas
+  d'`edge-tts` et de `lameenc`). **Copier** du code LGPL dans Joi : non, ce serait un morceau LGPL dans
+  un dépôt MIT → `s'inspirer`.
+- **MPL-2.0** : une dépendance est compatible ; un fichier copié reste MPL (la licence suit le fichier).
+  Possible, mais Joi deviendrait mixte : le dire, c'est la décision de l'utilisateur.
+- **GPL, AGPL** : copier est **incompatible avec MIT** → `s'inspirer` au mieux. Même en dépendance,
+  importer un paquet GPL depuis Joi rend la question floue (œuvre dérivée) : le dire, ne pas trancher le
+  droit, l'utilisateur décide.
+- **Non commerciale** (CC BY-NC, « research only ») : rien ne se copie dans le dépôt. Un modèle sous
+  une telle licence, téléchargé à l'exécution, reste utilisable pour l'usage de Joi, mais restreint ceux
+  qui reprendraient Joi : le dire.
 - **Aucune licence** : tous droits réservés. On ne copie rien ; `s'inspirer` au mieux.
-- Joi n'a pas encore de fichier `LICENSE` à la racine : tant que c'est le cas, juge ce que chaque
-  forme de réutilisation imposerait, et rappelle-le une fois au rapport (le choix d'une licence pour
-  Joi conditionne ce qu'on peut copier).
 
 **Verdict recommandé** — vocabulaire fermé, **un mot par hypothèse**, sans exception :
 
@@ -178,7 +183,7 @@ Une ligne suffit quand un axe n'a rien à dire ; un axe absent rend le rapport i
   pas ; nommer ce qui manque et ce qui permettrait de trancher.
 
 Qualifieurs à mettre avec le verdict quand ils s'appliquent : la licence (`MIT`, `GPL-3.0 : copie
-impossible sans changer la licence de Joi`), `déjà planifié (docs/plan-x.md)`, `non planifié`.
+incompatible avec MIT`), `déjà planifié (docs/plan-x.md)`, `non planifié`.
 
 ### 6. Écrire les sorties
 
